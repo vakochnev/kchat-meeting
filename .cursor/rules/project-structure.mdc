@@ -1,0 +1,63 @@
+---
+description: Структура проекта и организация кода
+alwaysApply: true
+---
+
+# Структура проекта kchat-opros
+
+```
+kchat-meeting/
+├── config/
+│   └── meeting/           # JSON конфигурации совещание
+├── db/
+│   ├── models.py          # SQLAlchemy модели
+│   ├── session.py         # Управление сессиями
+│   └── storage.py         # Репозитории
+├── modules/
+│   ├── answers/           # Обработчики типов ответов
+│   │   ├── base.py        # Абстрактный класс
+│   │   ├── choice.py      # Единственный/множественный выбор
+│   │   ├── text.py        # Текстовый ввод
+│   │   └── rating.py      # Шкала/ранжирование
+│   ├── core/              # Ядро приложения
+│   │   ├── app.py         # BotApp
+│   │   └── sse_handler.py # Обработка SSE
+│   └── meeting/           # Логика опросов
+│       ├── handler.py     # Главный обработчик
+│       ├── processor.py   # Обработка ответов
+│       ├── state.py       # Состояние опроса
+│       └── ui.py          # Формирование UI
+├── libs/                  # Внешние библиотеки
+├── config.py              # Конфигурация
+├── main.py                # Точка входа
+└── requirements.txt
+```
+
+## Правила организации
+
+### Новый функционал
+1. Определить модуль (answers/meeting/core)
+2. Создать класс с единой ответственностью
+3. Добавить типизацию и docstrings
+4. Написать тесты
+
+### Импорты
+```python
+# Порядок импортов (PEP8)
+import os                          # 1. Стандартная библиотека
+from datetime import datetime
+
+import sqlalchemy                  # 2. Сторонние библиотеки
+from messenger_bot_api import ...
+
+from config import config          # 3. Локальные модули
+from db import get_session
+```
+
+### Константы
+Выносить в начало файла или в отдельный `constants.py`:
+```python
+# В начале файла
+MAX_OPTIONS_PER_ROW = 3
+CALLBACK_PREFIX_ANSWER = "answer_"
+```

@@ -1,0 +1,8 @@
+# Основные зависимости
+python-dotenv>=1.0.0
+requests>=2.31.0
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+
+# Библиотека бота (копировать из kchat-bot/libs/)
+# messenger_bot_api-2.0.3-py3-none-any.whl

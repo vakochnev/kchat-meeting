@@ -1,0 +1,117 @@
+---
+description: Схема JSON для конфигурации опросов
+globs: "**/config/meeting/**/*.json"
+alwaysApply: false
+---
+
+# Схема JSON вопроса
+
+## Структура вопроса
+```json
+{
+  "survey_id": "survey_feedback_2025",
+  "name": "Опрос обратной связи",
+  "description": "Краткое описание опроса",
+  "welcome_message": "Приветственное сообщение",
+  "completion_message": "Сообщение по завершении",
+  "questions": [...]
+}
+```
+
+## Типы вопросов
+
+### choice - единственный выбор
+```json
+{
+  "id": "q1",
+  "type": "choice",
+  "text": "Выберите вариант:",
+  "required": true,
+  "options": [
+    {"value": "opt1", "label": "Вариант 1"},
+    {"value": "opt2", "label": "Вариант 2"}
+  ]
+}
+```
+
+### multiple_choice - множественный выбор
+```json
+{
+  "id": "q2",
+  "type": "multiple_choice",
+  "text": "Выберите несколько:",
+  "required": true,
+  "min_selections": 1,
+  "max_selections": 3,
+  "options": [
+    {"value": "a", "label": "Вариант A"},
+    {"value": "b", "label": "Вариант B"}
+  ]
+}
+```
+
+### yes_no - да/нет
+```json
+{
+  "id": "q3",
+  "type": "yes_no",
+  "text": "Согласны ли вы?",
+  "required": true
+}
+```
+
+### text - текстовый ввод
+```json
+{
+  "id": "q4",
+  "type": "text",
+  "text": "Введите комментарий:",
+  "required": false,
+  "hint": "Подсказка для пользователя",
+  "min_length": 0,
+  "max_length": 500
+}
+```
+
+### number - числовой ввод
+```json
+{
+  "id": "q5",
+  "type": "number",
+  "text": "Укажите количество:",
+  "required": true,
+  "min_value": 0,
+  "max_value": 100,
+  "hint": "Введите число"
+}
+```
+
+### rating - шкала/рейтинг
+```json
+{
+  "id": "q6",
+  "type": "rating",
+  "text": "Оцените от 1 до 5:",
+  "required": true,
+  "min": 1,
+  "max": 5,
+  "labels": {"1": "Плохо", "5": "Отлично"},
+  "hint": "Выберите оценку"
+}
+```
+
+## Условные вопросы
+```json
+{
+  "id": "q7",
+  "type": "text",
+  "text": "Почему выбрали 'Нет'?",
+  "required": true,
+  "condition": {
+    "question_id": "q3",
+    "operator": "equals",
+    "value": "no"
+  }
+}
+```
+Операторы: `equals`, `not_equals`, `contains`, `in`

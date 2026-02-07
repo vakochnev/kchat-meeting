@@ -1,0 +1,65 @@
+---
+description: Python стандарты кодирования для проекта kchat-meeting
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python стандарты
+
+## PEP8 и форматирование
+- Максимальная длина строки: 100 символов
+- Отступы: 4 пробела (не табы)
+- Пустые строки: 2 между классами/функциями верхнего уровня, 1 внутри классов
+
+## Типизация (обязательно)
+```python
+# ❌ ПЛОХО
+def process_answer(event, answer):
+    pass
+
+# ✅ ХОРОШО  
+def process_answer(event: MessageBotEvent, answer: str) -> bool:
+    pass
+```
+
+## Docstrings (Google style)
+```python
+def process_meeting(user_id: int, meeting_id: str) -> MeetingResult:
+    """Обрабатывает прохождение совещание.
+    
+    Args:
+        user_id: ID пользователя в K-CHAT.
+        meeting_id: Уникальный идентификатор совещание.
+        
+    Returns:
+        Результат прохождения совещание.
+        
+    Raises:
+        MeetingNotFoundError: Совещание не найден.
+    """
+```
+
+## Обработка ошибок
+```python
+# ❌ ПЛОХО - подавление ошибок
+try:
+    result = process()
+except Exception:
+    pass
+
+# ✅ ХОРОШО - логирование и обработка
+try:
+    result = process()
+except MeetingNotFoundError as e:
+    logger.warning("Опрос не найден: %s", e)
+    raise
+except Exception as e:
+    logger.error("Ошибка обработки: %s", e, exc_info=True)
+    raise ProcessingError("Не удалось обработать") from e
+```
+
+## Именование
+- Классы: `PascalCase` (MeetingHandler, QuestionProcessor)
+- Функции/методы: `snake_case` (process_answer, get_survey)
+- Константы: `UPPER_SNAKE_CASE` (MAX_BUTTONS, COMMANDS)
+- Приватные: префикс `_` (_internal_method)

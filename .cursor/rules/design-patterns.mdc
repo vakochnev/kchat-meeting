@@ -1,0 +1,70 @@
+---
+description: Паттерны проектирования для бота опросов
+alwaysApply: true
+---
+
+# Архитектурные принципы
+
+## SOLID
+- **Single Responsibility**: каждый класс - одна задача
+- **Open/Closed**: расширение через наследование/композицию, не модификацию
+- **Dependency Inversion**: зависимость от абстракций
+
+## Паттерны проекта
+
+### Strategy - для типов вопросов
+```python
+# Абстрактный обработчик ответа
+class AnswerHandler(ABC):
+    @abstractmethod
+    def validate(self, answer: str, question: Question) -> bool: ...
+    
+    @abstractmethod
+    def format_answer(self, answer: str) -> Any: ...
+
+# Конкретные стратегии
+class SingleChoiceHandler(AnswerHandler): ...
+class MultipleChoiceHandler(AnswerHandler): ...
+class TextInputHandler(AnswerHandler): ...
+```
+
+### Factory - создание обработчиков
+```python
+class AnswerHandlerFactory:
+    _handlers: dict[QuestionType, type[AnswerHandler]] = {
+        QuestionType.SINGLE_CHOICE: SingleChoiceHandler,
+        QuestionType.TEXT: TextInputHandler,
+    }
+    
+    @classmethod
+    def create(cls, question_type: QuestionType) -> AnswerHandler:
+        handler_class = cls._handlers.get(question_type)
+        if not handler_class:
+            raise ValueError(f"Неизвестный тип вопроса: {question_type}")
+        return handler_class()
+```
+
+### State - для состояния опроса
+```python
+class MeetingState:
+    meeting_id: str
+    current_question_index: int
+    answers: dict[str, Any]
+    
+    def next_question(self) -> Question | None: ...
+    def previous_question(self) -> Question | None: ...
+```
+
+### Repository - для работы с БД
+```python
+class MettingResultRepository:
+    def save(self, result: MettingResult) -> None: ...
+    def get_by_user(self, user_id: int) -> list[SurveyResult]: ...
+    def get_by_meeting(self, metting_id: str) -> list[SurveyResult]: ...
+```
+
+## Запрещено
+- Глобальные переменные (кроме config)
+- Хардкод значений (выносить в config/constants)
+- Копипаст кода (выделять в функции/классы)
+- Костыли и временные решения

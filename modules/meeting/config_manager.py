@@ -1,0 +1,219 @@
+"""
+Менеджер конфигурации совещаний - загрузка JSON файла.
+"""
+import json
+import logging
+from pathlib import Path
+from typing import Dict, Any, Optional
+
+from config import config
+
+logger = logging.getLogger(__name__)
+
+
+class MeetingConfigManager:
+    """Менеджер загрузки и кэширования конфигурации совещаний."""
+    
+    def __init__(self, config_file: Optional[Path] = None):
+        """
+        Инициализирует менеджер конфигурации.
+        
+        Args:
+            config_file: Путь к файлу конфигурации.
+        """
+        if config_file:
+            self.config_file = config_file
+        else:
+            self.config_file = (
+                config.base_dir / "config" / "meeting.json"
+            )
+        self.invited_file = config.base_dir / "config" / "invited.json"
+
+        self._config: Optional[Dict[str, Any]] = None
+        self._invited_config: Optional[Dict[str, Any]] = None
+        self._load()
+        self._load_invited()
+    
+    def _load(self) -> None:
+        """Загружает конфигурацию из JSON файла."""
+        if not self.config_file.exists():
+            logger.warning(
+                "Файл конфигурации не существует: %s",
+                self.config_file
+            )
+            self._config = self._get_default_config()
+            return
+        
+        try:
+            with open(self.config_file, "r", encoding="utf-8") as f:
+                self._config = json.load(f)
+            logger.info("Конфигурация совещаний загружена")
+        except Exception as e:
+            logger.error(
+                "Ошибка загрузки конфигурации: %s",
+                e,
+                exc_info=True
+            )
+            self._config = self._get_default_config()
+    
+    def _get_default_config(self) -> Dict[str, Any]:
+        """
+        Возвращает конфигурацию по умолчанию.
+        
+        Returns:
+            Словарь с конфигурацией по умолчанию.
+        """
+        return {
+            "messages": {
+                "greeting": "Здравствуйте!\n\nФИО: {fio}",
+                "greeting_anonymous": "Здравствуйте!",
+                "welcome": (
+                    "📅 Вы приглашены на совещание.\n\n"
+                    "ФИО: {fio}\n\n"
+                    "Планируете ли вы присутствовать на совещании?"
+                ),
+                "welcome_without_fio": (
+                    "📅 Вы приглашены на совещание.\n\n"
+                    "Планируете ли вы присутствовать на совещании?"
+                ),
+                "not_allowed": (
+                    "❌ Вы не найдены в списке приглашённых "
+                    "на совещание.\n\n"
+                    "Если вы считаете, что это ошибка, "
+                    "обратитесь к организатору."
+                ),
+                "answer_success": (
+                    "✅ Данные успешно сохранены.\n\n"
+                    "Спасибо за ответ!\n"
+                    "Ваш ответ: {answer}\n"
+                    "Данные отправлены организатору."
+                ),
+                "answer_error": (
+                    "❌ Произошла ошибка при сохранении ответа.\n"
+                    "Попробуйте позже или обратитесь к организатору."
+                ),
+                "help": (
+                    "📖 **Справка по боту совещаний**\n\n"
+                    "**Команды:**\n"
+                    "• /start - начать работу и проверить приглашение\n"
+                    "• /информация - информация о совещании (дата, время)\n"
+                    "• /участие - голосование о присутствии (Да/Нет)\n"
+                    "• /приглашенные - список приглашённых и проголосовавших\n"
+                    "• /помощь - эта справка\n\n"
+                    "**Как это работает:**\n"
+                    "1. Запустите бота командой /start\n"
+                    "2. Если вы приглашены на совещание, "
+                    "вам будет предложено подтвердить присутствие\n"
+                    "3. Выберите ответ из предложенных вариантов\n"
+                    "4. Ваш ответ будет отправлен организатору"
+                ),
+            },
+            "buttons": {
+                "yes": {
+                    "id": 1,
+                    "label": "✅ Да, буду присутствовать",
+                    "callback_message": "✅ Да, буду присутствовать",
+                    "callback_data": "meeting_yes",
+                    "answer_text": "Да, буду присутствовать",
+                },
+                "no": {
+                    "id": 2,
+                    "label": "❌ Нет, не смогу присутствовать",
+                    "callback_message": "❌ Нет, не смогу присутствовать",
+                    "callback_data": "meeting_no",
+                    "answer_text": "Нет, не смогу присутствовать",
+                },
+            },
+        }
+    
+    def _load_invited(self) -> None:
+        """Загружает список приглашённых из invited.json."""
+        if not self.invited_file.exists():
+            logger.warning(
+                "Файл приглашённых не существует: %s",
+                self.invited_file
+            )
+            self._invited_config = {"meeting": {}, "invited": []}
+            return
+        try:
+            with open(self.invited_file, "r", encoding="utf-8") as f:
+                self._invited_config = json.load(f)
+            logger.info("Список приглашённых загружен")
+        except Exception as e:
+            logger.error(
+                "Ошибка загрузки invited.json: %s",
+                e,
+                exc_info=True
+            )
+            self._invited_config = {"meeting": {}, "invited": []}
+
+    def get_invited_list(self) -> list:
+        """
+        Возвращает список приглашённых из invited.json.
+
+        Returns:
+            Список словарей с полями last_name, first_name, middle_name,
+            email, phone и т.д.
+        """
+        if not self._invited_config:
+            self._load_invited()
+        return self._invited_config.get("invited", []) or []
+
+    def get_meeting_info(self) -> Dict[str, Any]:
+        """
+        Возвращает данные совещания из invited.json.
+
+        Returns:
+            Словарь: topic, datetime, date, time, place (место), goal (цель),
+            link или connection_link (ссылка на подключение, например Skype).
+        """
+        if not self._invited_config:
+            self._load_invited()
+        return self._invited_config.get("meeting", {}) or {}
+
+    def reload(self) -> None:
+        """Перезагружает конфигурацию из файла."""
+        self._load()
+        self._load_invited()
+    
+    def get_message(self, key: str) -> str:
+        """
+        Возвращает сообщение по ключу.
+        
+        Args:
+            key: Ключ сообщения (welcome, not_allowed, и т.д.).
+            
+        Returns:
+            Текст сообщения или пустая строка.
+        """
+        if not self._config:
+            return ""
+        
+        return self._config.get("messages", {}).get(key, "")
+    
+    def get_button(self, key: str) -> Optional[Dict[str, Any]]:
+        """
+        Возвращает конфигурацию кнопки по ключу.
+        
+        Args:
+            key: Ключ кнопки ("yes" или "no").
+            
+        Returns:
+            Словарь с конфигурацией кнопки или None.
+        """
+        if not self._config:
+            return None
+        
+        return self._config.get("buttons", {}).get(key)
+    
+    def get_all_buttons(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Возвращает все кнопки.
+        
+        Returns:
+            Словарь со всеми кнопками.
+        """
+        if not self._config:
+            return {}
+        
+        return self._config.get("buttons", {})

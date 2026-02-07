@@ -1,0 +1,83 @@
+"""
+Конфигурация бота совещаний.
+"""
+import os
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
+
+from dotenv import load_dotenv
+
+# Загружаем .env
+load_dotenv()
+
+
+@dataclass
+class Config:
+    """Конфигурация приложения."""
+    
+    # Пути
+    base_dir: Path = field(
+        default_factory=lambda: Path(__file__).parent
+    )
+    meeting_dir: Path = field(
+        default_factory=lambda: (
+            Path(__file__).parent / "config" / "meeting"
+        )
+    )
+    
+    # Бот
+    bot_token: str = field(
+        default_factory=lambda: os.getenv("BOT_TOKEN", "")
+    )
+    
+    # API URLs
+    api_base_url: str = field(
+        default_factory=lambda: os.getenv(
+            "API_BASE_URL",
+            "https://api.kchat.app"
+        )
+    )
+    sse_base_url: str = field(
+        default_factory=lambda: os.getenv(
+            "SSE_BASE_URL",
+            "https://pusher.kchat.app"
+        )
+    )
+    backend_api_url: str = field(
+        default_factory=lambda: os.getenv("BACKEND_API_URL", "")
+    )
+    backend_api_token: Optional[str] = field(
+        default_factory=lambda: os.getenv("BACKEND_API_TOKEN")
+    )
+    # Отправка ответов на бэкенд (true/1/yes — включена, false/0/no — только таблица)
+    send_to_backend: bool = field(
+        default_factory=lambda: os.getenv("SEND_TO_BACKEND", "false").lower()
+        in ("true", "1", "yes", "on")
+    )
+    
+    # База данных
+    database_url: str = field(
+        default_factory=lambda: os.getenv(
+            "DATABASE_URL",
+            "sqlite:///meeting.db"
+        )
+    )
+    
+    # Логирование
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
+    log_file: Optional[str] = field(default_factory=lambda: os.getenv("LOG_FILE"))
+    
+    # Настройки совещаний
+    # (оставлено для совместимости, если понадобится)
+    
+    def validate(self) -> None:
+        """Проверяет обязательные настройки."""
+        if not self.bot_token:
+            raise ValueError("BOT_TOKEN не указан")
+        if not self.meeting_dir.exists():
+            self.meeting_dir.mkdir(parents=True, exist_ok=True)
+
+
+# Глобальный экземпляр конфигурации
+config = Config()

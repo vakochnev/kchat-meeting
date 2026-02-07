@@ -1,0 +1,77 @@
+---
+description: Специфика работы с K-CHAT Bot API
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# K-CHAT Bot API
+
+## Библиотека messenger_bot_api
+Используем локальную библиотеку `libs/messenger_bot_api-2.0.3-py3-none-any.whl`
+
+## Шифрование ГОСТ "Кузнечик" (ВКЛЮЧЕНО)
+Все запросы к REST API шифруются алгоритмом ГОСТ Р 34.12-2015.
+Библиотеки: `gostcrypto` или `PyGOST`
+
+```python
+# Тело запроса оборачивается в base64
+{"content": "base64_encrypted_payload"}
+
+# Ключ шифрования хранится в .env
+ENCRYPTION_KEY=...
+```
+
+## Ограничения API
+- Максимум **20 кнопок** под сообщением
+- Кнопки НЕ работают в информационных каналах
+- Callback data должен быть компактным
+
+## Формат callback_data
+```python
+# Формат: {action}_{id}_{value}
+# Примеры:
+"meeting_feedback"      # Выбор опроса
+"start_feedback"       # Начать опрос
+"answer_q1_option2"    # Ответ на вопрос
+"nav_back"             # Навигация назад
+"nav_skip"             # Пропустить вопрос
+```
+
+## Обработка событий
+```python
+def handle_message(event: MessageBotEvent) -> None:
+    # Всегда проверяем текст
+    text = (event.text or "").strip()
+    if not text:
+        return
+    
+    # Логируем для отладки
+    logger.debug("Сообщение от %s: %s", event.sender_id, text[:50])
+
+def handle_callback(event: MessageBotEvent) -> None:
+    callback_data = event.callback_data or ""
+    # Парсим и обрабатываем
+```
+
+## Подтверждение сообщений
+После обработки подтверждать через:
+`POST /botapi/v1/messages/confirm/{workspaceId}/{groupId}`
+
+## SSE события
+- MESSAGE - новое сообщение
+- MESSAGE_UPDATE - обновление сообщения
+- GROUP_ME_ADD - бот добавлен в группу
+- GROUP_ME_REMOVE - бот удален из группы
+
+## Отправка сообщений с кнопками
+```python
+# Кнопки в несколько рядов
+buttons = [
+    [{"text": "Вариант 1", "callback_data": "answer_q1_1"}],
+    [{"text": "Вариант 2", "callback_data": "answer_q1_2"}],
+    [
+        {"text": "⬅️ Назад", "callback_data": "nav_back"},
+        {"text": "❌ Отмена", "callback_data": "cancel"}
+    ]
+]
+```
