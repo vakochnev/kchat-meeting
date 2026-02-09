@@ -173,11 +173,11 @@ class MeetingService:
         user_fn = get_str(user_data, "first_name")
         user_mn = get_str(user_data, "middle_name")
         logger.debug(
-            "allowed_check: пользователь ФИО=[%s %s %s] email=%s",
+            "allowed_check: проверка ФИО — пользователь [%s %s %s] email=%s",
             user_ln or "",
             user_fn or "",
             user_mn or "",
-            "есть" if user_email else "нет",
+            user_email or "нет",
         )
 
         def fio_eq(a: Optional[str], b: Optional[str]) -> bool:
@@ -210,6 +210,11 @@ class MeetingService:
                 and fio_eq(user_mn or "", inv_mn or "")
             )
             if not fio_match:
+                logger.debug(
+                    "allowed_check: не совпало ФИО — пользователь [%s %s %s] vs invited [%s %s %s]",
+                    user_ln or "", user_fn or "", user_mn or "",
+                    inv_ln or "", inv_fn or "", inv_mn or "",
+                )
                 continue
             inv_email = self._normalize_email(get_str(inv, "email"))
             if inv_email:
@@ -219,6 +224,11 @@ class MeetingService:
                         inv_ln or "", inv_fn or "",
                     )
                     return meeting_dt
+                else:
+                    logger.debug(
+                        "allowed_check: ФИО совпало, но email не совпал — пользователь email=%s vs invited email=%s",
+                        user_email or "нет", inv_email,
+                    )
             else:
                 logger.debug(
                     "allowed_check: совпадение по ФИО с записью [%s %s] (email в json не задан)",
@@ -228,8 +238,10 @@ class MeetingService:
 
         logger.debug(
             "allowed_check: нет совпадения в списке приглашённых (%s записей); "
-            "проверены ФИО и при наличии — email",
+            "проверены ФИО и при наличии — email. Пользователь: ФИО=[%s %s %s] email=%s",
             len(invited_list),
+            user_ln or "", user_fn or "", user_mn or "",
+            user_email or "нет",
         )
         return None
 
@@ -278,7 +290,14 @@ class MeetingService:
 
         try:
             payload = event.get_payload_data()
+            logger.info(
+                "payload_check: sender_id=%s payload_type=%s payload_keys=%s",
+                event.sender_id,
+                type(payload).__name__,
+                list(payload.keys()) if isinstance(payload, dict) else "не dict",
+            )
             if not isinstance(payload, dict):
+                logger.info("payload_check: payload не является словарём")
                 return None
             # 1) Классический формат: payload.messages[0].sender / .user
             messages = payload.get("messages")
@@ -287,14 +306,23 @@ class MeetingService:
                 if isinstance(msg, dict):
                     sender = msg.get("sender") or msg.get("user") or msg
                     if sender and isinstance(sender, dict):
+                        logger.info(
+                            "payload_check: найдены данные в messages[0], sender_keys=%s",
+                            list(sender.keys()),
+                        )
                         return sender_to_user_data(sender)
             # 2) Fallback: пользователь в корне payload (часть SSE)
             sender = payload.get("user") or payload.get("sender")
             if sender and isinstance(sender, dict):
+                logger.info(
+                    "payload_check: найдены данные в payload.user/sender, keys=%s",
+                    list(sender.keys()),
+                )
                 return sender_to_user_data(sender)
+            logger.info("payload_check: данные пользователя не найдены в payload")
             return None
         except Exception as e:
-            logger.debug("Не удалось извлечь данные из payload: %s", e)
+            logger.info("payload_check: ошибка извлечения данных из payload: %s", e, exc_info=True)
             return None
 
     def _get_user_data_from_event(
@@ -309,11 +337,22 @@ class MeetingService:
         if event.sender_id is not None:
             try:
                 from api.users import get_user_info, user_info_to_user_data
+                logger.info("api_check: запрос к API для sender_id=%s", event.sender_id)
                 user_info = get_user_info(event.sender_id)
                 if user_info:
+                    logger.info("api_check: получены данные из API, keys=%s", list(user_info.keys()))
                     api_data = user_info_to_user_data(user_info)
+                    logger.info(
+                        "api_check: преобразовано в user_data — ФИО=[%s %s %s] email=%s",
+                        api_data.get("last_name") or "",
+                        api_data.get("first_name") or "",
+                        api_data.get("middle_name") or "",
+                        api_data.get("email") or "нет",
+                    )
+                else:
+                    logger.info("api_check: API вернул пустой результат")
             except Exception as e:
-                logger.debug("Не удалось получить пользователя из API: %s", e)
+                logger.info("api_check: ошибка получения пользователя из API: %s", e, exc_info=True)
         user_data = _merge_user_data(payload_data, api_data)
         has_ident = bool(
             user_data
@@ -328,6 +367,15 @@ class MeetingService:
             "есть" if api_data else "нет",
             has_ident,
         )
+        if user_data:
+            logger.debug(
+                "allowed_check: данные пользователя из SSE/API — ФИО=[%s %s %s] email=%s phone=%s",
+                user_data.get("last_name") or "",
+                user_data.get("first_name") or "",
+                user_data.get("middle_name") or "",
+                user_data.get("email") or "нет",
+                user_data.get("phone") or "нет",
+            )
         if not has_ident:
             return None
         return user_data
@@ -343,11 +391,20 @@ class MeetingService:
                 "allowed_check: sender_id=%s — нет ФИО/email из SSE и API, доступ запрещён",
                 event.sender_id,
             )
-        in_invited = (
-            self._meeting_datetime_if_invited(user_data) is not None
-            if user_data else False
+            return False
+        
+        logger.debug(
+            "allowed_check: sender_id=%s данные из SSE/API — ФИО=[%s %s %s] email=%s",
+            event.sender_id,
+            user_data.get("last_name") or "",
+            user_data.get("first_name") or "",
+            user_data.get("middle_name") or "",
+            user_data.get("email") or "нет",
         )
-        allowed = user_data is not None and in_invited
+        
+        in_invited = self._meeting_datetime_if_invited(user_data) is not None
+        allowed = in_invited
+        
         if allowed:
             logger.info(
                 "Пользователь допущен к совещанию: sender_id=%s",
@@ -355,7 +412,7 @@ class MeetingService:
             )
         else:
             logger.info(
-                "Пользователь НЕ допущен к совещанию: sender_id=%s",
+                "Пользователь НЕ допущен к совещанию: sender_id=%s (не найден в invited.json или совещание в прошлом)",
                 event.sender_id
             )
         return allowed
@@ -678,9 +735,9 @@ class MeetingService:
                 event_data.get("phone")
             )
             
-            job_title = _normalize_job_title(
+            job_title = (#_normalize_job_title(
                 sender_data.get("job_title") or
-                sender_data.get("position") or
+                # sender_data.get("position") or
                 event_data.get("job_title")
             )
             
@@ -703,9 +760,18 @@ class MeetingService:
             
             # Данные пользователя в БД не сохраняем при входе в чат (SSE).
             # Сохранение выполняется только при голосовании (sync_user_from_event в handler).
-            logger.debug(
-                "SSE MESSAGE: sender_id=%s (данные в БД сохраняются при голосовании)",
+            logger.info(
+                "SSE MESSAGE: sender_id=%s ФИО=[%s %s %s] email=%s (данные в БД сохраняются при голосовании)",
                 sender_id,
+                last_name or "",
+                first_name or "",
+                middle_name or "",
+                email or "нет",
+            )
+            logger.info(
+                "SSE MESSAGE: структура события — type=%s keys=%s",
+                event_type,
+                list(event_data.keys()),
             )
         
         except Exception as e:

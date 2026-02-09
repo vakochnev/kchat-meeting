@@ -12,17 +12,17 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
-def _normalize_job_title(value: Any) -> Optional[str]:
-    """
-    Возвращает строку должности или None.
-    Числовые значения (ID должности, напр. 113) не считаются названием — отбрасываются.
-    """
-    if value is None:
-        return None
-    s = str(value).strip()
-    if not s or s.isdigit():
-        return None
-    return s
+# def _normalize_job_title(value: Any) -> Optional[str]:
+#     """
+#     Возвращает строку должности или None.
+#     Числовые значения (ID должности, напр. 113) не считаются названием — отбрасываются.
+#     """
+#     if value is None:
+#         return None
+#     s = str(value).strip()
+#     if not s or s.isdigit():
+#         return None
+#     return s
 
 
 def get_user_info(user_id: int) -> Dict[str, Any]:
@@ -110,7 +110,7 @@ def user_info_to_user_data(user_info: Dict[str, Any]) -> Dict[str, Any]:
     phone = get_str("phone", "phoneNumber") or None
     if phone == "":
         phone = None
-    job_title = _normalize_job_title(
+    job_title = (#_normalize_job_title(
         user_info.get("job_title") or user_info.get("jobTitle") or user_info.get("position")
     )
 

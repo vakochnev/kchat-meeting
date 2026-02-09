@@ -131,6 +131,19 @@ class MeetingHandler:
                 "📅 Вы приглашены на совещание.\n"
                 "Планируете ли вы присутствовать на совещании?"
             )
+            # Добавляем информацию о совещании (дата, время, тема)
+            meeting_info = self.config.get_meeting_info()
+            meeting_details = []
+            topic = meeting_info.get("topic")
+            if topic:
+                meeting_details.append(f"**{topic}**")
+            date_str = meeting_info.get("date") or ""
+            time_str = meeting_info.get("time") or ""
+            if date_str or time_str:
+                meeting_details.append(f"🕐 Дата и время: {date_str} {time_str}".strip())
+            if meeting_details:
+                meeting_info_text = "\n".join(meeting_details)
+                welcome_part = f"{welcome_part}\n\n{meeting_info_text}"
             one_message = f"{greeting}\n\n{welcome_part}"
             self.service.ask_attendance(event, message=one_message)
         else:
