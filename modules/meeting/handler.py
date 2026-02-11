@@ -132,7 +132,7 @@ class MeetingHandler:
                 "Планируете ли вы присутствовать на совещании?"
             )
             # Добавляем информацию о совещании (дата, время, тема)
-            meeting_info = self.config.get_meeting_info()
+            meeting_info = self.service.get_meeting_info()
             meeting_details = []
             topic = meeting_info.get("topic")
             if topic:
@@ -152,10 +152,10 @@ class MeetingHandler:
     
     def _handle_meeting_check(self, event: MessageBotEvent) -> None:
         """
-        Обрабатывает команду /информация: только информация о совещании из invited.json
+        Обрабатывает команду /информация: информация о совещании из БД
         (дата, время, место, цель, ссылка на подключение). Без вопросов и кнопок.
         """
-        meeting_info = self.config.get_meeting_info()
+        meeting_info = self.service.get_meeting_info()
         topic = meeting_info.get("topic") or "Совещание"
         date_str = meeting_info.get("date") or ""
         time_str = meeting_info.get("time") or ""
@@ -228,11 +228,11 @@ class MeetingHandler:
 
     def _handle_invited(self, event: MessageBotEvent) -> None:
         """
-        Обрабатывает команду /приглашенные: список приглашённых из invited.json.
+        Обрабатывает команду /приглашенные: список приглашённых из БД.
         Отметка по данным из БД: сопоставление по ФИО и дате совещания.
         ✅ если ответ «да», ❌ если «нет»; только у проголосовавших.
         """
-        invited = self.config.get_invited_list()
+        invited = self.service.get_invited_list()
         voted = self.service.get_voted_users()
         vote_by_fio = {}
         vote_by_email = {}

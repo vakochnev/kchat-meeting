@@ -12,6 +12,7 @@ from config import config as app_config
 from .storage import MeetingStorage
 from .api_client import BackendAPIClient
 from .config_manager import MeetingConfigManager
+from .meeting_repository import MeetingRepository
 from db.models import MeetingUser
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,7 @@ class MeetingService:
         self.storage = MeetingStorage()
         self.api_client = BackendAPIClient()
         self.config = config_manager or MeetingConfigManager()
+        self.meeting_repo = MeetingRepository()
     
     def sync_user_from_event(self, event: MessageBotEvent) -> Optional[MeetingUser]:
         """
@@ -129,12 +131,11 @@ class MeetingService:
         user_data: Dict[str, Optional[str]],
     ) -> Optional[datetime]:
         """
-        Сравнение с invited.json: ФИО должно совпадать; если у записи в json
-        указан email — дополнительно должно совпадать поле email пользователя.
-        Возвращает meeting_datetime при совпадении, иначе None.
+        Сравнение с invited из БД: приоритет email; при пустом email — fallback на ФИО.
+        Данные пользователя из SSE. Возвращает meeting_datetime при совпадении, иначе None.
         """
-        invited_list = self.config.get_invited_list()
-        meeting_info = self.config.get_meeting_info()
+        invited_list = self.meeting_repo.get_invited_list()
+        meeting_info = self.meeting_repo.get_meeting_info()
         if not invited_list or not meeting_info:
             logger.debug(
                 "allowed_check: нет данных для проверки — invited_list=%s, meeting_info=%s",
@@ -167,24 +168,10 @@ class MeetingService:
                     return str(v).strip()
             return None
 
-        user_email = self._normalize_email(get_str(user_data, "email"))
-        user_phone = self._normalize_phone(get_str(user_data, "phone"))
-        user_ln = get_str(user_data, "last_name")
-        user_fn = get_str(user_data, "first_name")
-        user_mn = get_str(user_data, "middle_name")
-        logger.debug(
-            "allowed_check: проверка ФИО — пользователь [%s %s %s] email=%s",
-            user_ln or "",
-            user_fn or "",
-            user_mn or "",
-            user_email or "нет",
-        )
-
         def fio_eq(a: Optional[str], b: Optional[str]) -> bool:
             return (a or "").strip().lower() == (b or "").strip().lower()
 
         def inv_fio(inv: dict) -> tuple:
-            """ФИО из записи invited: last_name, first_name, middle_name."""
             ln = get_str(inv, "last_name", "lastName")
             fn = get_str(inv, "first_name", "firstName")
             mn = get_str(inv, "middle_name", "middleName")
@@ -200,48 +187,40 @@ class MeetingService:
                         return parts[0], None, None
             return ln, fn, mn
 
+        user_email = self._normalize_email(get_str(user_data, "email"))
+        user_ln = get_str(user_data, "last_name")
+        user_fn = get_str(user_data, "first_name")
+        user_mn = get_str(user_data, "middle_name")
+
         for inv in invited_list:
             if not isinstance(inv, dict):
                 continue
+            inv_email = self._normalize_email(get_str(inv, "email"))
+
+            # 1) Приоритет: совпадение по email
+            if inv_email:
+                if user_email and user_email == inv_email:
+                    logger.debug("allowed_check: совпадение по email [%s]", user_email)
+                    return meeting_dt
+                continue
+
+            # 2) Fallback: в invited нет email — совпадение по ФИО
             inv_ln, inv_fn, inv_mn = inv_fio(inv)
             fio_match = (
                 fio_eq(user_ln, inv_ln)
                 and fio_eq(user_fn, inv_fn)
                 and fio_eq(user_mn or "", inv_mn or "")
             )
-            if not fio_match:
+            if fio_match:
                 logger.debug(
-                    "allowed_check: не совпало ФИО — пользователь [%s %s %s] vs invited [%s %s %s]",
-                    user_ln or "", user_fn or "", user_mn or "",
+                    "allowed_check: совпадение по ФИО [%s %s %s] (в invited нет email)",
                     inv_ln or "", inv_fn or "", inv_mn or "",
-                )
-                continue
-            inv_email = self._normalize_email(get_str(inv, "email"))
-            if inv_email:
-                if user_email and user_email == inv_email:
-                    logger.debug(
-                        "allowed_check: совпадение по ФИО и email с записью [%s %s]",
-                        inv_ln or "", inv_fn or "",
-                    )
-                    return meeting_dt
-                else:
-                    logger.debug(
-                        "allowed_check: ФИО совпало, но email не совпал — пользователь email=%s vs invited email=%s",
-                        user_email or "нет", inv_email,
-                    )
-            else:
-                logger.debug(
-                    "allowed_check: совпадение по ФИО с записью [%s %s] (email в json не задан)",
-                    inv_ln or "", inv_fn or "",
                 )
                 return meeting_dt
 
         logger.debug(
-            "allowed_check: нет совпадения в списке приглашённых (%s записей); "
-            "проверены ФИО и при наличии — email. Пользователь: ФИО=[%s %s %s] email=%s",
+            "allowed_check: нет совпадения по email/ФИО в invited (%s записей)",
             len(invited_list),
-            user_ln or "", user_fn or "", user_mn or "",
-            user_email or "нет",
         )
         return None
 
@@ -357,7 +336,7 @@ class MeetingService:
         has_ident = bool(
             user_data
             and any(
-                user_data.get(k) for k in ("email", "last_name", "first_name")
+                user_data.get(k) for k in ("email", "phone", "last_name", "first_name")
             )
         )
         logger.debug(
@@ -388,18 +367,16 @@ class MeetingService:
         user_data = self._get_user_data_from_event(event)
         if user_data is None:
             logger.debug(
-                "allowed_check: sender_id=%s — нет ФИО/email из SSE и API, доступ запрещён",
+                "allowed_check: sender_id=%s — нет email/телефона из SSE и API, доступ запрещён",
                 event.sender_id,
             )
             return False
         
         logger.debug(
-            "allowed_check: sender_id=%s данные из SSE/API — ФИО=[%s %s %s] email=%s",
+            "allowed_check: sender_id=%s данные из SSE/API — email=%s phone=%s",
             event.sender_id,
-            user_data.get("last_name") or "",
-            user_data.get("first_name") or "",
-            user_data.get("middle_name") or "",
             user_data.get("email") or "нет",
+            user_data.get("phone") or "нет",
         )
         
         in_invited = self._meeting_datetime_if_invited(user_data) is not None
@@ -549,10 +526,12 @@ class MeetingService:
         self, meeting_info: Dict[str, Any]
     ) -> Optional[datetime]:
         """
-        Парсит дату/время совещания из meeting (invited.json).
-        Поддерживает: поле "datetime" (ISO) или пару "date" + "time"
-        (date: DD.MM.YYYY или YYYY-MM-DD, time: HH:MM или HH:MM:SS).
+        Парсит дату/время совещания из meeting (БД или json).
+        Поддерживает: datetime_utc (из БД), datetime (ISO), date + time.
         """
+        dt_utc = meeting_info.get("datetime_utc")
+        if isinstance(dt_utc, datetime):
+            return dt_utc
         dt_str = meeting_info.get("datetime")
         if dt_str:
             try:
@@ -591,16 +570,15 @@ class MeetingService:
             return None
 
     def _get_meeting_datetime(self) -> Optional[datetime]:
-        """Возвращает дату/время совещания из invited.json или None."""
-        meeting_info = self.config.get_meeting_info()
-        return self._parse_meeting_datetime_from_info(meeting_info)
+        """Возвращает дату/время активного совещания из БД или None."""
+        return self.meeting_repo.get_meeting_datetime()
 
     def get_meeting_datetime_display(self) -> str:
         """
-        Возвращает строку даты и времени совещания для отображения (из invited.json).
+        Возвращает строку даты и времени совещания для отображения.
         Например: "15.02.2026, 10:00".
         """
-        meeting_info = self.config.get_meeting_info()
+        meeting_info = self.meeting_repo.get_meeting_info()
         date_str = (meeting_info.get("date") or "").strip()
         time_str = (meeting_info.get("time") or "").strip()
         if date_str and time_str:
@@ -612,9 +590,17 @@ class MeetingService:
             return meeting_dt.strftime("%d.%m.%Y, %H:%M")
         return ""
 
+    def get_meeting_info(self) -> Dict[str, Any]:
+        """Возвращает данные активного совещания (topic, date, time, place, goal и т.д.)."""
+        return self.meeting_repo.get_meeting_info()
+
+    def get_invited_list(self) -> list:
+        """Возвращает список приглашённых активного совещания."""
+        return self.meeting_repo.get_invited_list()
+
     def get_voted_users(self) -> list:
         """
-        Возвращает список проголосовавших по текущему совещанию (дата из invited.json).
+        Возвращает список проголосовавших по текущему совещанию.
         Отметки ✅/❌ показываются только за это совещание.
         """
         meeting_dt = self._get_meeting_datetime()

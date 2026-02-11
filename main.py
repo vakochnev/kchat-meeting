@@ -51,7 +51,18 @@ def main() -> int:
     except Exception as e:
         logger.error("Ошибка инициализации БД: %s", e)
         return 1
-    
+
+    # Импортируем invited.json в БД при первом запуске (если нет активного совещания)
+    try:
+        from modules.meeting.meeting_repository import MeetingRepository
+        repo = MeetingRepository()
+        if not repo.get_active_meeting():
+            mid, count = repo.import_from_invited_json()
+            if mid:
+                logger.info("Импорт invited.json в БД: meeting_id=%s, invited=%s", mid, count)
+    except Exception as e:
+        logger.warning("Импорт invited.json не выполнен: %s", e)
+
     # Создаём обработчик совещаний
     meeting_handler = MeetingHandler()
     
