@@ -44,6 +44,20 @@ class Meeting(BaseModel):
         return f"<Meeting(id={self.id}, topic={self.topic})>"
 
 
+class MeetingAdmin(BaseModel):
+    """Администратор (общий для всех собраний). Email и ФИО для приветствия."""
+    
+    __tablename__ = "meeting_admins"
+    
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    last_name = Column(String(100), nullable=True)
+    first_name = Column(String(100), nullable=True)
+    middle_name = Column(String(100), nullable=True)
+    
+    def __repr__(self) -> str:
+        return f"<MeetingAdmin(id={self.id}, email={self.email})>"
+
+
 class Invited(BaseModel):
     """Приглашённый на совещание."""
     

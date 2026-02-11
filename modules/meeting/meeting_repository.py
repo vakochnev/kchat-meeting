@@ -10,7 +10,7 @@ import json
 
 from sqlalchemy import select
 
-from db.models import Invited, Meeting
+from db.models import Invited, Meeting, MeetingAdmin
 from db.session import get_session_context
 
 from config import config
@@ -90,6 +90,53 @@ class MeetingRepository:
                 }
                 for r in rows
             ]
+
+    def save_admin(
+        self,
+        email: str,
+        last_name: Optional[str] = None,
+        first_name: Optional[str] = None,
+        middle_name: Optional[str] = None,
+    ) -> MeetingAdmin:
+        """Добавляет администратора (общий для всех собраний)."""
+        with get_session_context() as session:
+            admin = MeetingAdmin(
+                email=email.strip().lower(),
+                last_name=last_name,
+                first_name=first_name,
+                middle_name=middle_name,
+            )
+            session.add(admin)
+            return admin
+
+    def get_admin_fio(self, email: Optional[str] = None) -> Optional[str]:
+        """
+        Возвращает ФИО админа для приветствия по email.
+        """
+        if not email:
+            return None
+        with get_session_context() as session:
+            stmt = select(MeetingAdmin).where(
+                MeetingAdmin.email == email.strip().lower(),
+            )
+            admin = session.scalar(stmt)
+            if not admin:
+                return None
+            parts = [
+                admin.last_name,
+                admin.first_name,
+                admin.middle_name,
+            ]
+            parts = [p.strip() for p in parts if p and p.strip()]
+            return " ".join(parts) if parts else None
+
+    def is_admin(self, email: str) -> bool:
+        """Проверяет, является ли email администратором."""
+        with get_session_context() as session:
+            stmt = select(MeetingAdmin).where(
+                MeetingAdmin.email == email.strip().lower(),
+            )
+            return session.scalar(stmt) is not None
 
     def save_meeting(
         self,
@@ -185,6 +232,7 @@ class MeetingRepository:
 
         meeting_data = data.get("meeting", {})
         invited_data = data.get("invited", [])
+        admins_data = data.get("admins", [])
 
         if not meeting_data and not invited_data:
             logger.info("invited.json пуст")
@@ -230,7 +278,31 @@ class MeetingRepository:
                 ))
                 count += 1
 
-        logger.info("Импорт из invited.json: meeting_id=%s, invited=%s", meeting_id, count)
+            admins_count = 0
+            for adm in admins_data:
+                if not isinstance(adm, dict) or not adm.get("email"):
+                    continue
+                email = (adm.get("email") or "").strip().lower()
+                existing = session.scalar(
+                    select(MeetingAdmin).where(MeetingAdmin.email == email)
+                )
+                if existing:
+                    existing.last_name = adm.get("last_name")
+                    existing.first_name = adm.get("first_name")
+                    existing.middle_name = adm.get("middle_name")
+                else:
+                    session.add(MeetingAdmin(
+                        email=email,
+                        last_name=adm.get("last_name"),
+                        first_name=adm.get("first_name"),
+                        middle_name=adm.get("middle_name"),
+                    ))
+                admins_count += 1
+
+        logger.info(
+            "Импорт из invited.json: meeting_id=%s, invited=%s, admins=%s",
+            meeting_id, count, admins_count,
+        )
         return meeting_id, count
 
     @staticmethod

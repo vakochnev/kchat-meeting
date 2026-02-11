@@ -6,6 +6,7 @@ from .models import (
     BaseModel,
     Invited,
     Meeting,
+    MeetingAdmin,
     MeetingUser,
 )
 from .session import (
@@ -20,6 +21,7 @@ __all__ = [
     'BaseModel',
     'Invited',
     'Meeting',
+    'MeetingAdmin',
     'MeetingUser',
     'get_engine',
     'get_session',
