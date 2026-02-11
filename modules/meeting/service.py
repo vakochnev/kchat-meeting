@@ -525,14 +525,15 @@ class MeetingService:
         for key in ["yes", "no"]:
             button_config = all_buttons.get(key)
             if button_config:
+                label = button_config.get("label") or ""
+                callback_message = button_config.get("callback_message") or label
+                callback_data = button_config.get("callback_data") or ""
                 buttons.append(
                     InlineMessageButton(
                         id=button_config.get("id"),
-                        label=button_config.get("label"),
-                        callback_message=button_config.get(
-                            "callback_message"
-                        ),
-                        callback_data=button_config.get("callback_data"),
+                        label=label,
+                        callback_message=callback_message,
+                        callback_data=callback_data,
                     )
                 )
         
