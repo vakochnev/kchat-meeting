@@ -37,28 +37,34 @@ class MeetingRepository:
         Возвращает данные активного совещания в формате словаря.
         Аналог get_meeting_info из config (topic, date, time, place, link, url).
         """
-        meeting = self.get_active_meeting()
-        if not meeting:
-            return {}
-        return {
-            "topic": meeting.topic,
-            "url": meeting.url,
-            "date": meeting.date,
-            "time": meeting.time,
-            "datetime_utc": meeting.datetime_utc,
-            "place": meeting.place,
-            "link": meeting.link,
-        }
+        with get_session_context() as session:
+            meeting = session.scalar(
+                select(Meeting).where(Meeting.is_active == True)
+            )
+            if not meeting:
+                return {}
+            return {
+                "topic": meeting.topic,
+                "url": meeting.url,
+                "date": meeting.date,
+                "time": meeting.time,
+                "datetime_utc": meeting.datetime_utc,
+                "place": meeting.place,
+                "link": meeting.link,
+            }
 
     def get_meeting_datetime(self) -> Optional[datetime]:
         """Возвращает datetime активного совещания (для сопоставления с MeetingUser)."""
-        meeting = self.get_active_meeting()
-        if not meeting:
-            return None
-        if meeting.datetime_utc:
-            return meeting.datetime_utc
-        if meeting.date and meeting.time:
-            return self._parse_datetime(meeting.date, meeting.time)
+        with get_session_context() as session:
+            meeting = session.scalar(
+                select(Meeting).where(Meeting.is_active == True)
+            )
+            if not meeting:
+                return None
+            if meeting.datetime_utc:
+                return meeting.datetime_utc
+            if meeting.date and meeting.time:
+                return self._parse_datetime(meeting.date, meeting.time)
         return None
 
     def get_invited_list(
@@ -68,15 +74,17 @@ class MeetingRepository:
         Возвращает список приглашённых в формате словарей.
         Если meeting_id не задан — для активного совещания.
         """
-        meeting = (
-            self.get_meeting_by_id(meeting_id)
-            if meeting_id is not None
-            else self.get_active_meeting()
-        )
-        if not meeting:
-            return []
-
         with get_session_context() as session:
+            if meeting_id is not None:
+                meeting = session.scalar(
+                    select(Meeting).where(Meeting.id == meeting_id)
+                )
+            else:
+                meeting = session.scalar(
+                    select(Meeting).where(Meeting.is_active == True)
+                )
+            if not meeting:
+                return []
             stmt = select(Invited).where(Invited.meeting_id == meeting.id)
             rows = session.scalars(stmt).all()
             return [
@@ -182,6 +190,35 @@ class MeetingRepository:
                     is_active=is_active,
                 )
                 session.add(meeting)
+            session.flush()
+            return meeting.id
+
+    def create_new_meeting(
+        self,
+        topic: str,
+        date: str,
+        time: str,
+        place: Optional[str] = None,
+        link: Optional[str] = None,
+    ) -> int:
+        """
+        Деактивирует все совещания и создаёт новое с заданными полями.
+        Возвращает ID созданного совещания.
+        """
+        datetime_utc = self._parse_datetime(date, time)
+        with get_session_context() as session:
+            for m in session.scalars(select(Meeting)).all():
+                m.is_active = False
+            meeting = Meeting(
+                topic=topic.strip() or None,
+                date=date.strip() or None,
+                time=time.strip() or None,
+                datetime_utc=datetime_utc,
+                place=place.strip() if place else None,
+                link=link.strip() if link else None,
+                is_active=True,
+            )
+            session.add(meeting)
             session.flush()
             return meeting.id
 

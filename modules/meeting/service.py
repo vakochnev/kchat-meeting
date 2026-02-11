@@ -269,14 +269,14 @@ class MeetingService:
 
         try:
             payload = event.get_payload_data()
-            logger.info(
+            logger.debug(
                 "payload_check: sender_id=%s payload_type=%s payload_keys=%s",
                 event.sender_id,
                 type(payload).__name__,
                 list(payload.keys()) if isinstance(payload, dict) else "не dict",
             )
             if not isinstance(payload, dict):
-                logger.info("payload_check: payload не является словарём")
+                logger.debug("payload_check: payload не является словарём")
                 return None
             # 1) Классический формат: payload.messages[0].sender / .user
             messages = payload.get("messages")
@@ -285,7 +285,7 @@ class MeetingService:
                 if isinstance(msg, dict):
                     sender = msg.get("sender") or msg.get("user") or msg
                     if sender and isinstance(sender, dict):
-                        logger.info(
+                        logger.debug(
                             "payload_check: найдены данные в messages[0], sender_keys=%s",
                             list(sender.keys()),
                         )
@@ -316,12 +316,12 @@ class MeetingService:
         if event.sender_id is not None:
             try:
                 from api.users import get_user_info, user_info_to_user_data
-                logger.info("api_check: запрос к API для sender_id=%s", event.sender_id)
+                logger.debug("api_check: запрос к API для sender_id=%s", event.sender_id)
                 user_info = get_user_info(event.sender_id)
                 if user_info:
-                    logger.info("api_check: получены данные из API, keys=%s", list(user_info.keys()))
+                    logger.debug("api_check: получены данные из API, keys=%s", list(user_info.keys()))
                     api_data = user_info_to_user_data(user_info)
-                    logger.info(
+                    logger.debug(
                         "api_check: преобразовано в user_data — ФИО=[%s %s %s] email=%s",
                         api_data.get("last_name") or "",
                         api_data.get("first_name") or "",
@@ -396,6 +396,14 @@ class MeetingService:
                 event.sender_id
             )
         return allowed
+
+    def get_user_email(self, event: MessageBotEvent) -> Optional[str]:
+        """Возвращает email пользователя из события (payload или API)."""
+        user_data = self._get_user_data_from_event(event)
+        if not user_data:
+            return None
+        email = (user_data.get("email") or "").strip()
+        return email.lower() if email else None
     
     def get_user_fio(
         self,

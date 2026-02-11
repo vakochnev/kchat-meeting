@@ -4,10 +4,11 @@
 import logging
 from typing import Dict, Any
 
-from messenger_bot_api import MessageBotEvent
+from messenger_bot_api import MessageBotEvent, InlineMessageButton, MessageRequest
 
 from .service import MeetingService
 from .config_manager import MeetingConfigManager
+from .create_meeting_flow import CreateMeetingFlow
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,14 @@ COMMANDS = {
     "/meeting": "meeting",
     "/участие": "attendance",
     "/приглашенные": "invited",
+    "/собрание": "meeting_menu",
+    "/создать_собрание": "create_meeting",
+    "/create_meeting": "create_meeting",
+    "/отмена": "cancel",
+    "/отмен": "cancel",
+    "/cancel": "cancel",
+    "/пропустить": "skip",
+    "/skip": "skip",
     "/помощь": "help",
     "/help": "help",
 }
@@ -28,9 +37,9 @@ class MeetingHandler:
     """Главный обработчик событий бота совещаний."""
     
     def __init__(self):
-        # Создаём один экземпляр конфигурации и передаём его в сервис
         self.config = MeetingConfigManager()
         self.service = MeetingService(config_manager=self.config)
+        self.create_meeting_flow = CreateMeetingFlow()
     
     def handle_message(self, event: MessageBotEvent) -> None:
         """Обрабатывает входящее сообщение."""
@@ -45,16 +54,32 @@ class MeetingHandler:
         
         logger.debug("Сообщение от %s: %s", event.sender_id, text[:50])
         
-        # Проверяем команды (точное совпадение или начало строки для /приглашенные)
         text_lower = text.lower()
         command = COMMANDS.get(text_lower)
         if not command and text_lower.startswith("/приглашенные"):
             command = "invited"
+
         if command:
+            if command == "skip" and self.create_meeting_flow.is_active(event):
+                msg = self.create_meeting_flow.try_skip(event, self.service.meeting_repo.create_new_meeting)
+                event.reply_text(msg[0])
+                return
+            if command == "skip":
+                event.reply_text("Команда /пропустить доступна только для необязательных полей (место, ссылка).")
+                return
+            if command != "cancel" and self.create_meeting_flow.is_active(event):
+                self.create_meeting_flow.cancel(event)
             self._handle_command(event, command)
             return
-        
-        # Неизвестное сообщение
+
+        # Пользователь в диалоге создания собрания — обрабатываем ввод
+        if self.create_meeting_flow.is_active(event):
+            msg, done = self.create_meeting_flow.process(
+                event, text, self.service.meeting_repo.create_new_meeting
+            )
+            event.reply_text(msg)
+            return
+
         self._show_help(event)
     
     def handle_callback(self, event: MessageBotEvent) -> None:
@@ -77,6 +102,15 @@ class MeetingHandler:
         
         elif callback_data == "meeting_no":
             self._handle_attendance_answer(event, "no")
+
+        elif callback_data == "meeting_create":
+            self._handle_create_meeting(event)
+
+        elif callback_data == "meeting_edit":
+            event.reply_text("⏳ Функция «Изменить» в разработке.")
+
+        elif callback_data == "meeting_move":
+            event.reply_text("⏳ Функция «Перенести» в разработке.")
         
         else:
             logger.warning("Неизвестный callback: %s", callback_data)
@@ -113,7 +147,16 @@ class MeetingHandler:
 
         elif command == "invited":
             self._handle_invited(event)
-        
+
+        elif command == "meeting_menu":
+            self._handle_meeting_menu(event)
+
+        elif command == "create_meeting":
+            self._handle_create_meeting(event)
+
+        elif command == "cancel":
+            self._handle_cancel(event)
+
         elif command == "help":
             self._show_help(event)
     
@@ -150,6 +193,49 @@ class MeetingHandler:
             one_message = f"{greeting}\n\n{self.config.get_message('not_allowed')}"
             event.reply_text(one_message)
     
+    def _handle_meeting_menu(self, event: MessageBotEvent) -> None:
+        """Команда /собрание — меню с кнопками: Создать, Изменить, Перенести."""
+        message = "📋 **Собрание**\n\nВыберите действие:"
+        buttons = [
+            InlineMessageButton(id=1, label="✨ Создать", callback_message="✨ Создать", callback_data="meeting_create"),
+            InlineMessageButton(id=2, label="✏️ Изменить", callback_message="✏️ Изменить", callback_data="meeting_edit"),
+            InlineMessageButton(id=3, label="📅 Перенести", callback_message="📅 Перенести", callback_data="meeting_move"),
+        ]
+        try:
+            event.reply_text_message(MessageRequest(text=message, buttons=buttons))
+        except Exception as e:
+            logger.error("Ошибка отправки меню собрания: %s", e)
+            event.reply_text(message)
+
+    def _handle_create_meeting(self, event: MessageBotEvent) -> None:
+        """
+        Создание собрания — только для админов.
+        Запускает пошаговый диалог ввода полей (вызов по /создать_собрание или кнопке Создать).
+        """
+        email = self.service.get_user_email(event)
+        if not email:
+            event.reply_text(
+                "❌ Для создания собрания необходим email в профиле. "
+                "Укажите email в настройках K-Chat."
+            )
+            return
+        if not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("create_meeting_not_admin")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        msg = self.create_meeting_flow.start(event)
+        event.reply_text(msg)
+
+    def _handle_cancel(self, event: MessageBotEvent) -> None:
+        """Команда /отмена — отмена диалога создания собрания."""
+        if self.create_meeting_flow.is_active(event):
+            msg = self.create_meeting_flow.cancel(event)
+            event.reply_text(msg)
+        else:
+            event.reply_text("Нет активного диалога для отмены.")
+
     def _handle_meeting_check(self, event: MessageBotEvent) -> None:
         """
         Обрабатывает команду /информация: информация о совещании из БД
