@@ -35,9 +35,7 @@ class Meeting(BaseModel):
     time = Column(String(50), nullable=True)  # "10:00"
     datetime_utc = Column(DateTime, nullable=True, index=True)  # разобранные дата+время
     place = Column(String(255), nullable=True)
-    goal = Column(String(500), nullable=True)
     link = Column(String(500), nullable=True)
-    connection_link = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)  # текущее активное совещание
     
     invited = relationship("Invited", back_populates="meeting", cascade="all, delete-orphan")

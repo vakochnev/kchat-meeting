@@ -164,8 +164,8 @@ class MeetingConfigManager:
         Возвращает данные совещания из invited.json.
 
         Returns:
-            Словарь: topic, datetime, date, time, place (место), goal (цель),
-            link или connection_link (ссылка на подключение, например Skype).
+            Словарь: topic, datetime, date, time, place (место),
+            link (ссылка на подключение), url.
         """
         if not self._invited_config:
             self._load_invited()

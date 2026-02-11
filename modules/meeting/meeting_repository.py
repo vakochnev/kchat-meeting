@@ -35,7 +35,7 @@ class MeetingRepository:
     def get_meeting_info(self) -> Dict[str, Any]:
         """
         Возвращает данные активного совещания в формате словаря.
-        Аналог get_meeting_info из config (topic, date, time, place, goal, link, url).
+        Аналог get_meeting_info из config (topic, date, time, place, link, url).
         """
         meeting = self.get_active_meeting()
         if not meeting:
@@ -47,9 +47,7 @@ class MeetingRepository:
             "time": meeting.time,
             "datetime_utc": meeting.datetime_utc,
             "place": meeting.place,
-            "goal": meeting.goal,
             "link": meeting.link,
-            "connection_link": meeting.connection_link,
         }
 
     def get_meeting_datetime(self) -> Optional[datetime]:
@@ -101,9 +99,7 @@ class MeetingRepository:
         time: Optional[str] = None,
         datetime_utc: Optional[datetime] = None,
         place: Optional[str] = None,
-        goal: Optional[str] = None,
         link: Optional[str] = None,
-        connection_link: Optional[str] = None,
         is_active: bool = True,
     ) -> int:
         """Создаёт или обновляет активное совещание."""
@@ -124,12 +120,8 @@ class MeetingRepository:
                     meeting.datetime_utc = datetime_utc
                 if place is not None:
                     meeting.place = place
-                if goal is not None:
-                    meeting.goal = goal
                 if link is not None:
                     meeting.link = link
-                if connection_link is not None:
-                    meeting.connection_link = connection_link
                 meeting.is_active = is_active
             else:
                 meeting = Meeting(
@@ -139,9 +131,7 @@ class MeetingRepository:
                     time=time,
                     datetime_utc=datetime_utc,
                     place=place,
-                    goal=goal,
                     link=link,
-                    connection_link=connection_link,
                     is_active=is_active,
                 )
                 session.add(meeting)
@@ -218,9 +208,7 @@ class MeetingRepository:
                 time=time_str,
                 datetime_utc=datetime_utc,
                 place=meeting_data.get("place"),
-                goal=meeting_data.get("goal"),
                 link=meeting_data.get("link"),
-                connection_link=meeting_data.get("connection_link"),
                 is_active=True,
             )
             session.add(meeting)

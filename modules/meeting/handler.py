@@ -160,8 +160,7 @@ class MeetingHandler:
         date_str = meeting_info.get("date") or ""
         time_str = meeting_info.get("time") or ""
         place = meeting_info.get("place") or ""
-        goal = meeting_info.get("goal") or ""
-        link = meeting_info.get("link") or meeting_info.get("connection_link") or ""
+        link = meeting_info.get("link") or ""
         url = meeting_info.get("url") or ""
 
         parts = [f"📅 **{topic}**"]
@@ -169,8 +168,6 @@ class MeetingHandler:
             parts.append(f"🕐 Дата и время: {date_str} {time_str}".strip())
         if place:
             parts.append(f"📍 Место: {place}")
-        if goal:
-            parts.append(f"🎯 Цель: {goal}")
         if link:
             parts.append(f"🔗 Подключение: {link}")
         if url:

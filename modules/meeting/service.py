@@ -591,7 +591,7 @@ class MeetingService:
         return ""
 
     def get_meeting_info(self) -> Dict[str, Any]:
-        """Возвращает данные активного совещания (topic, date, time, place, goal и т.д.)."""
+        """Возвращает данные активного совещания (topic, date, time, place, link и т.д.)."""
         return self.meeting_repo.get_meeting_info()
 
     def get_invited_list(self) -> list:
