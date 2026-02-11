@@ -380,12 +380,15 @@ class MeetingService:
         )
         
         in_invited = self._meeting_datetime_if_invited(user_data) is not None
-        allowed = in_invited
-        
+        email = (user_data.get("email") or "").strip().lower()
+        is_admin = bool(email and self.meeting_repo.is_admin(email))
+        allowed = in_invited or is_admin
+
         if allowed:
+            reason = "приглашён" if in_invited else "админ"
             logger.info(
-                "Пользователь допущен к совещанию: sender_id=%s",
-                event.sender_id
+                "Пользователь допущен к совещанию: sender_id=%s (%s)",
+                event.sender_id, reason
             )
         else:
             logger.info(
