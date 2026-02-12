@@ -81,15 +81,17 @@ def get_user_info(user_id: int) -> Dict[str, Any]:
 
 def user_info_to_user_data(user_info: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Преобразует ответ API getUser в словарь полей для сохранения в MeetingUser.
-    Учитывает разные форматы полей (camelCase, snake_case) и разбор поля name.
+    Преобразует ответ API getUser в словарь полей.
+    API может присылать name или отдельно last_name, first_name, middle_name.
+    Результат используется в _merge_user_data; при сохранении в БД вызывается
+    _build_full_name() для объединения в full_name.
 
     Args:
         user_info: Словарь из get_user_info (user из API).
 
     Returns:
-        Словарь с ключами: last_name, first_name, middle_name, email, phone,
-        username, job_title (значения могут быть пустыми строками или None).
+        Словарь с ключами last_name, first_name, middle_name (формат из API),
+        email, phone, username, job_title.
     """
     if not user_info:
         return {}

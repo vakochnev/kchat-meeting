@@ -23,7 +23,7 @@ def validate_meeting_time(value: str) -> Tuple[bool, Optional[str], Optional[str
     digits = re.sub(r"\D", "", raw)
 
     if not digits:
-        return False, None, "❌ Введите время цифрами в формате ЧЧ:ММ (например: 10:00)"
+        return False, None, "❌ Введите время цифрами в формате чч:мм (например: 10:00)"
 
     # Нормализация: заменяем разделители на ":"
     normalized_input = re.sub(r"[-:\s.]+", ":", raw).strip(":-. ")
@@ -49,7 +49,7 @@ def validate_meeting_time(value: str) -> Tuple[bool, Optional[str], Optional[str
             h, m = None, None
 
     if h is None or m is None:
-        return False, None, "❌ Неверный формат времени. Используйте ЧЧ:ММ (например: 10:00)"
+        return False, None, "❌ Неверный формат времени. Используйте чч:мм (например: 10:00)"
 
     if not (0 <= h <= 23):
         return False, None, "❌ Часы должны быть от 0 до 23"
@@ -81,7 +81,7 @@ def validate_meeting_date(value: str) -> Tuple[bool, Optional[str], Optional[str
         try:
             parsed = datetime.strptime(normalized, "%d.%m.%y").date()
         except ValueError:
-            return False, None, "❌ Неверный формат даты. Используйте ДД.ММ.ГГГГ (например: 16.02.2026)"
+            return False, None, "❌ Неверный формат даты. Используйте дд.мм.гггг (например: 16.02.2026)"
 
     today = date.today()
     if parsed < today:

@@ -1,12 +1,18 @@
 """
-Модели базы данных.
+Модели базы данных (SQLAlchemy 2.0 / Mapped style).
 """
-import json
 from datetime import datetime
-from typing import Dict, Any
+from typing import Optional
 
-from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, ForeignKey
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    BigInteger,
+    func,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -15,94 +21,95 @@ class Base(DeclarativeBase):
 
 
 class BaseModel(Base):
-    """Базовый класс для моделей с общими полями."""
-    
+    """Базовый класс для моделей с общими полями id, created_at, updated_at."""
+
     __abstract__ = True
-    
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
+class User(BaseModel):
+    """Пользователь, начавший чат с ботом."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    full_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    sender_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    group_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    workspace_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+
+    def __repr__(self) -> str:
+        return f"<User(id={self.id}, sender_id={self.sender_id}, email={self.email})>"
 
 
 class Meeting(BaseModel):
     """Совещание (собрание)."""
-    
+
     __tablename__ = "meetings"
-    
-    topic = Column(String(500), nullable=True)
-    url = Column(String(500), nullable=True)
-    date = Column(String(50), nullable=True)  # "16.02.2026"
-    time = Column(String(50), nullable=True)  # "10:00"
-    datetime_utc = Column(DateTime, nullable=True, index=True)  # разобранные дата+время
-    place = Column(String(255), nullable=True)
-    link = Column(String(500), nullable=True)
-    is_active = Column(Boolean, default=True, nullable=False)  # текущее активное совещание
-    
-    invited = relationship("Invited", back_populates="meeting", cascade="all, delete-orphan")
-    
+
+    topic: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    date: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "16.02.2026"
+    time: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)  # "10:00"
+    place: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    link: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    invited = relationship(
+        "Invited", back_populates="meeting", cascade="all, delete-orphan"
+    )
+
     def __repr__(self) -> str:
         return f"<Meeting(id={self.id}, topic={self.topic})>"
 
 
 class MeetingAdmin(BaseModel):
     """Администратор (общий для всех собраний). Email и ФИО для приветствия."""
-    
+
     __tablename__ = "meeting_admins"
-    
-    email = Column(String(255), nullable=False, unique=True, index=True)
-    last_name = Column(String(100), nullable=True)
-    first_name = Column(String(100), nullable=True)
-    middle_name = Column(String(100), nullable=True)
-    
+
+    email: Mapped[str] = mapped_column(
+        String(255), nullable=False, unique=True, index=True
+    )
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
     def __repr__(self) -> str:
         return f"<MeetingAdmin(id={self.id}, email={self.email})>"
 
 
 class Invited(BaseModel):
-    """Приглашённый на совещание."""
-    
+    """
+    Приглашённый на совещание.
+    Объединяет список приглашённых и ответы о присутствии (answer, status).
+    Связь: meeting.
+    """
+
     __tablename__ = "invited"
-    
-    meeting_id = Column(Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False)
-    last_name = Column(String(100), nullable=True)
-    first_name = Column(String(100), nullable=True)
-    middle_name = Column(String(100), nullable=True)
-    email = Column(String(255), nullable=True, index=True)
-    phone = Column(String(50), nullable=True)
-    login = Column(String(100), nullable=True)
-    
+
+    meeting_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    answer: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    status: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, server_default="invited"
+    )
+
     meeting = relationship("Meeting", back_populates="invited")
-    
-    def __repr__(self) -> str:
-        return f"<Invited(id={self.id}, {self.last_name} {self.first_name})>"
 
-
-class MeetingUser(BaseModel):
-    """Данные пользователя совещания из SSE событий."""
-    
-    __tablename__ = "meeting_users"
-    
-    # Данные из SSE
-    sender_id = Column(Integer, nullable=False, index=True)
-    group_id = Column(Integer, nullable=False, index=True)
-    workspace_id = Column(Integer, nullable=False, index=True)
-    username = Column(String(255), nullable=True)
-    email = Column(String(255), nullable=True, index=True)
-    phone = Column(String(50), nullable=True, index=True)
-    job_title = Column(String(255), nullable=True)
-    last_name = Column(String(100), nullable=True)
-    middle_name = Column(String(100), nullable=True)
-    first_name = Column(String(100), nullable=True)
-    
-    # Данные совещания
-    meeting_datetime = Column(DateTime, nullable=True, index=True)
-    
-    # Ответ пользователя
-    answer = Column(String(50), nullable=True)  # "yes" или "no"
-    status = Column(String(50), nullable=True)  # статус отправки на бэкенд
-    
     def __repr__(self) -> str:
-        return (
-            f"<MeetingUser(id={self.id}, sender_id={self.sender_id}, "
-            f"email={self.email}, answer={self.answer}, status={self.status})>"
-        )
+        return f"<Invited(id={self.id}, meeting_id={self.meeting_id}, full_name={self.full_name})>"

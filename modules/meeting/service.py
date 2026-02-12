@@ -8,12 +8,10 @@ from typing import Optional, Dict, Any
 
 from messenger_bot_api import MessageBotEvent, InlineMessageButton, MessageRequest
 
-from config import config as app_config
 from .storage import MeetingStorage
-from .api_client import BackendAPIClient
 from .config_manager import MeetingConfigManager
 from .meeting_repository import MeetingRepository
-from db.models import MeetingUser
+from db.user_repository import UserRepository
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +29,26 @@ def _normalize_job_title(value: Any) -> Optional[str]:
     return s
 
 
+def _build_full_name(data: Optional[Dict[str, Any]]) -> str:
+    """Собирает full_name из last_name, first_name, middle_name (формат SSE/API)."""
+    if not data:
+        return "—"
+    parts = [
+        (data.get("last_name") or "").strip(),
+        (data.get("first_name") or "").strip(),
+        (data.get("middle_name") or "").strip(),
+    ]
+    return " ".join(p for p in parts if p) or "—"
+
+
 def _merge_user_data(
     payload_data: Optional[Dict[str, Any]],
     api_data: Optional[Dict[str, Any]],
 ) -> Dict[str, Optional[str]]:
-    """Объединяет данные из payload и API: приоритет у непустых значений payload."""
+    """
+    Объединяет данные из payload (SSE) и API. SSE/API присылают last_name, first_name,
+    middle_name — при сохранении в БД использовать _build_full_name().
+    """
     result = {}
     for key in ("last_name", "first_name", "middle_name", "email", "phone",
                 "username", "job_title"):
@@ -61,33 +74,28 @@ class MeetingService:
         Args:
             config_manager: Менеджер конфигурации. Если не указан, создаётся новый.
         """
-        self.storage = MeetingStorage()
-        self.api_client = BackendAPIClient()
         self.config = config_manager or MeetingConfigManager()
         self.meeting_repo = MeetingRepository()
+        self.user_repo = UserRepository()
+        self.storage = MeetingStorage(
+            meeting_repo=self.meeting_repo,
+            user_repo=self.user_repo,
+        )
     
-    def sync_user_from_event(self, event: MessageBotEvent) -> Optional[MeetingUser]:
+    def sync_user_from_event(self, event: MessageBotEvent) -> None:
         """
         Проверка приглашённости: получаем ФИО и email из SSE (payload события),
-        при отсутствии — из API. Сравниваем с invited.json: совпадение ФИО,
-        при наличии email в записи json — ещё и совпадение email.
-        При совпадении выставляем meeting_datetime в БД.
+        при отсутствии — из API. Сравниваем с invited из БД по email.
+        При совпадении связываем Invited с User (user_id).
 
         Вызывать при любой команде/обращении пользователя.
-
-        Args:
-            event: Событие сообщения (SSE payload с данными отправителя).
-
-        Returns:
-            MeetingUser после сохранения или None.
         """
         sender_id = event.sender_id
         group_id = getattr(event, "group_id", None)
         workspace_id = getattr(event, "workspace_id", None)
         if not sender_id or not group_id or not workspace_id:
-            return None
+            return
 
-        # ФИО и email: приоритет у данных из SSE (payload), иначе — из API
         payload_data = self._user_data_from_message_payload(event)
         api_data = None
         try:
@@ -102,63 +110,61 @@ class MeetingService:
         if not user_data or not any(
             user_data.get(k) for k in ("email", "last_name", "first_name")
         ):
-            return self.storage.get_user(sender_id)
+            return
 
-        meeting_datetime = self._meeting_datetime_if_invited(user_data)
-        self.storage.save_user(
+        meeting_id = self._meeting_id_if_invited(user_data)
+        if meeting_id is None:
+            return
+
+        full_name = _build_full_name(user_data)
+        email = (user_data.get("email") or "").strip()
+        phone = (user_data.get("phone") or "").strip() or None
+        self.user_repo.save_user_on_chat(
             sender_id=sender_id,
             group_id=group_id,
             workspace_id=workspace_id,
-            email=user_data.get("email"),
-            phone=user_data.get("phone"),
-            last_name=user_data.get("last_name"),
-            first_name=user_data.get("first_name"),
-            middle_name=user_data.get("middle_name"),
-            username=user_data.get("username"),
-            job_title=user_data.get("job_title"),
-            meeting_datetime=meeting_datetime,
+            full_name=full_name or "—",
+            email=email or None,
+            phone=phone,
         )
-        if meeting_datetime is not None:
+        if email:
+            self.storage.update_invited_contact(
+                meeting_id=meeting_id,
+                email=email,
+                full_name=full_name or None,
+                phone=phone,
+            )
             logger.info(
                 "Пользователь в списке приглашённых: sender_id=%s",
-                sender_id
+                sender_id,
             )
 
-        return self.storage.get_user(sender_id)
-
-    def _meeting_datetime_if_invited(
+    def _meeting_id_if_invited(
         self,
         user_data: Dict[str, Optional[str]],
-    ) -> Optional[datetime]:
+    ) -> Optional[int]:
         """
-        Сравнение с invited из БД: приоритет email; при пустом email — fallback на ФИО.
-        Данные пользователя из SSE. Возвращает meeting_datetime при совпадении, иначе None.
+        Допуск по email: сверка со списком приглашённых (Invited по meeting_id).
+        Возвращает meeting_id при совпадении, иначе None.
         """
         invited_list = self.meeting_repo.get_invited_list()
         meeting_info = self.meeting_repo.get_meeting_info()
         if not invited_list or not meeting_info:
             logger.debug(
-                "allowed_check: нет данных для проверки — invited_list=%s, meeting_info=%s",
+                "allowed_check: нет данных — invited_list=%s, meeting_info=%s",
                 "пусто" if not invited_list else len(invited_list),
                 "пусто" if not meeting_info else "есть",
             )
             return None
 
+        meeting_id = meeting_info.get("meeting_id")
         meeting_dt = self._parse_meeting_datetime_from_info(meeting_info)
-        if meeting_dt is None:
-            logger.debug(
-                "allowed_check: не удалось получить дату совещания (ключи meeting: %s)",
-                list(meeting_info.keys()),
-            )
+        if meeting_id is None or meeting_dt is None:
             return None
 
-        # Совещание в прошлом — участников нет, всем отказ
         now = datetime.utcnow() if meeting_dt.tzinfo is None else datetime.now(meeting_dt.tzinfo)
         if meeting_dt < now:
-            logger.debug(
-                "allowed_check: совещание в прошлом (%s), доступ запрещён",
-                meeting_dt,
-            )
+            logger.debug("allowed_check: совещание в прошлом, доступ запрещён")
             return None
 
         def get_str(d: dict, *keys: str) -> Optional[str]:
@@ -168,58 +174,22 @@ class MeetingService:
                     return str(v).strip()
             return None
 
-        def fio_eq(a: Optional[str], b: Optional[str]) -> bool:
-            return (a or "").strip().lower() == (b or "").strip().lower()
-
-        def inv_fio(inv: dict) -> tuple:
-            ln = get_str(inv, "last_name", "lastName")
-            fn = get_str(inv, "first_name", "firstName")
-            mn = get_str(inv, "middle_name", "middleName")
-            if not ln and not fn and not mn:
-                name = get_str(inv, "name")
-                if name:
-                    parts = name.split(maxsplit=2)
-                    if len(parts) >= 3:
-                        return parts[0], parts[1], parts[2]
-                    if len(parts) == 2:
-                        return parts[0], parts[1], None
-                    if len(parts) == 1:
-                        return parts[0], None, None
-            return ln, fn, mn
-
         user_email = self._normalize_email(get_str(user_data, "email"))
-        user_ln = get_str(user_data, "last_name")
-        user_fn = get_str(user_data, "first_name")
-        user_mn = get_str(user_data, "middle_name")
+        if not user_email:
+            logger.debug("allowed_check: у пользователя нет email")
+            return None
 
         for inv in invited_list:
             if not isinstance(inv, dict):
                 continue
             inv_email = self._normalize_email(get_str(inv, "email"))
-
-            # 1) Приоритет: совпадение по email
-            if inv_email:
-                if user_email and user_email == inv_email:
-                    logger.debug("allowed_check: совпадение по email [%s]", user_email)
-                    return meeting_dt
-                continue
-
-            # 2) Fallback: в invited нет email — совпадение по ФИО
-            inv_ln, inv_fn, inv_mn = inv_fio(inv)
-            fio_match = (
-                fio_eq(user_ln, inv_ln)
-                and fio_eq(user_fn, inv_fn)
-                and fio_eq(user_mn or "", inv_mn or "")
-            )
-            if fio_match:
-                logger.debug(
-                    "allowed_check: совпадение по ФИО [%s %s %s] (в invited нет email)",
-                    inv_ln or "", inv_fn or "", inv_mn or "",
-                )
-                return meeting_dt
+            if inv_email and user_email == inv_email:
+                logger.debug("allowed_check: совпадение по email [%s]", user_email)
+                return meeting_id
 
         logger.debug(
-            "allowed_check: нет совпадения по email/ФИО в invited (%s записей)",
+            "allowed_check: email [%s] не найден в invited (%s записей)",
+            user_email,
             len(invited_list),
         )
         return None
@@ -322,10 +292,8 @@ class MeetingService:
                     logger.debug("api_check: получены данные из API, keys=%s", list(user_info.keys()))
                     api_data = user_info_to_user_data(user_info)
                     logger.debug(
-                        "api_check: преобразовано в user_data — ФИО=[%s %s %s] email=%s",
-                        api_data.get("last_name") or "",
-                        api_data.get("first_name") or "",
-                        api_data.get("middle_name") or "",
+                        "api_check: преобразовано в user_data — full_name=%s email=%s",
+                        _build_full_name(api_data),
                         api_data.get("email") or "нет",
                     )
                 else:
@@ -333,12 +301,7 @@ class MeetingService:
             except Exception as e:
                 logger.info("api_check: ошибка получения пользователя из API: %s", e, exc_info=True)
         user_data = _merge_user_data(payload_data, api_data)
-        has_ident = bool(
-            user_data
-            and any(
-                user_data.get(k) for k in ("email", "phone", "last_name", "first_name")
-            )
-        )
+        has_ident = bool(user_data and (user_data.get("email") or "").strip())
         logger.debug(
             "allowed_check: sender_id=%s payload=%s api=%s merged_has_fio_or_email=%s",
             event.sender_id,
@@ -348,38 +311,61 @@ class MeetingService:
         )
         if user_data:
             logger.debug(
-                "allowed_check: данные пользователя из SSE/API — ФИО=[%s %s %s] email=%s phone=%s",
-                user_data.get("last_name") or "",
-                user_data.get("first_name") or "",
-                user_data.get("middle_name") or "",
+                "allowed_check: full_name=%s email=%s",
+                _build_full_name(user_data),
                 user_data.get("email") or "нет",
-                user_data.get("phone") or "нет",
             )
         if not has_ident:
             return None
         return user_data
 
+    def sync_user_to_users_table(self, event: MessageBotEvent) -> None:
+        """
+        Сохраняет пользователя, начавшего чат с ботом, в таблицу users.
+        Вызывать при каждом message/callback (если есть sender_id, group_id, workspace_id).
+        """
+        sender_id = event.sender_id
+        group_id = getattr(event, "group_id", None)
+        workspace_id = getattr(event, "workspace_id", None)
+        if not sender_id or group_id is None or workspace_id is None:
+            return
+        user_data = self._get_user_data_from_event(event)
+        full_name = _build_full_name(user_data)
+        email = (user_data.get("email") or "").strip() if user_data else None
+        phone = (user_data.get("phone") or "").strip() if user_data else None
+        if not email and not phone and full_name == "—":
+            email = ""  # сохраняем с пустым email, если нет данных
+        try:
+            self.user_repo.save_user_on_chat(
+                sender_id=sender_id,
+                group_id=group_id,
+                workspace_id=workspace_id,
+                full_name=full_name,
+                email=email or None,
+                phone=phone or None,
+            )
+        except Exception as e:
+            logger.warning("Ошибка сохранения пользователя в users: %s", e)
+
     def check_user_allowed(self, event: MessageBotEvent) -> bool:
         """
-        Проверяет, допущен ли пользователь: только сравнение данных из SSE
-        (кто зашёл) со списком приглашённых из json. Таблица не участвует.
+        Проверяет допуск по email: пользователь в списке приглашённых или админ.
         """
         user_data = self._get_user_data_from_event(event)
         if user_data is None:
             logger.debug(
-                "allowed_check: sender_id=%s — нет email/телефона из SSE и API, доступ запрещён",
+                "allowed_check: sender_id=%s — нет email (допуск только по email)",
                 event.sender_id,
             )
             return False
-        
+
         logger.debug(
-            "allowed_check: sender_id=%s данные из SSE/API — email=%s phone=%s",
+            "allowed_check: sender_id=%s email=%s",
             event.sender_id,
             user_data.get("email") or "нет",
-            user_data.get("phone") or "нет",
         )
         
-        in_invited = self._meeting_datetime_if_invited(user_data) is not None
+        in_invited = self._meeting_id_if_invited(user_data) is not None
         email = (user_data.get("email") or "").strip().lower()
         is_admin = bool(email and self.meeting_repo.is_admin(email))
         allowed = in_invited or is_admin
@@ -392,7 +378,7 @@ class MeetingService:
             )
         else:
             logger.info(
-                "Пользователь НЕ допущен к совещанию: sender_id=%s (не найден в invited.json или совещание в прошлом)",
+                "Пользователь НЕ допущен к совещанию: sender_id=%s (не найден в списке приглашённых или совещание в прошлом)",
                 event.sender_id
             )
         return allowed
@@ -412,32 +398,27 @@ class MeetingService:
     ) -> Optional[str]:
         """
         Возвращает ФИО пользователя по sender_id для приветствия.
-        Только чтение: из БД или из события (payload/API). В БД не сохраняет —
-        сохранение выполняется при голосовании (sync_user_from_event).
+        Из users, payload или API.
         """
-        fio = self.storage.get_user_fio(sender_id)
-        if fio:
-            return fio
+        if event is not None:
+            group_id = getattr(event, "group_id", None)
+            workspace_id = getattr(event, "workspace_id", None)
+            if group_id is not None and workspace_id is not None:
+                user = self.user_repo.get_by_chat(sender_id, group_id, workspace_id)
+                if user and (user.full_name or "").strip():
+                    return (user.full_name or "").strip()
 
         if event is not None:
             payload_fio, payload_data = self._fio_from_message_payload(event)
             if payload_fio:
                 return payload_fio
-
             try:
                 from api.users import get_user_info, user_info_to_user_data
                 user_info = get_user_info(sender_id)
                 if user_info:
                     api_data = user_info_to_user_data(user_info)
                     merged = _merge_user_data(payload_data, api_data)
-                    parts = [
-                        merged.get("last_name"),
-                        merged.get("first_name"),
-                        merged.get("middle_name"),
-                    ]
-                    parts = [p.strip() for p in parts if p and str(p).strip()]
-                    if parts:
-                        return " ".join(parts)
+                    return _build_full_name(merged)
             except Exception as e:
                 logger.debug("Не удалось получить ФИО из API: %s", e)
 
@@ -446,13 +427,13 @@ class MeetingService:
     def _fio_from_message_payload(
         self,
         event: MessageBotEvent,
-    ) -> tuple[Optional[str], Optional[Dict[str, Optional[str]]]]:
+    ) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
         """
         Извлекает ФИО из payload события (messages[0].sender или messages[0]).
-        Поддерживает camelCase и snake_case.
+        SSE присылает last_name, first_name, middle_name — собираем в full_name.
 
         Returns:
-            (fio_string, dict с last_name, first_name, middle_name для сохранения в БД).
+            (full_name, сырые данные из payload).
         """
         try:
             payload = event.get_payload_data()
@@ -473,21 +454,17 @@ class MeetingService:
                         return str(v).strip()
                 return None
 
-            last_name = get_str(sender, "last_name", "lastName", "surname")
-            middle_name = get_str(sender, "middle_name", "middleName")
-            first_name = get_str(sender, "first_name", "firstName", "name")
-
-            parts = [p for p in (last_name, first_name, middle_name) if p]
+            # SSE присылает last_name, first_name, middle_name
+            ln = get_str(sender, "last_name", "lastName", "surname")
+            fn = get_str(sender, "first_name", "firstName", "name")
+            mn = get_str(sender, "middle_name", "middleName")
+            parts = [p for p in (ln, fn, mn) if p]
             if not parts:
                 return None, None
 
-            fio = " ".join(parts)
-            data = {
-                "last_name": last_name,
-                "first_name": first_name,
-                "middle_name": middle_name,
-            }
-            return fio, data
+            full_name = " ".join(parts)
+            data = {"last_name": ln, "first_name": fn, "middle_name": mn}
+            return full_name, data
         except Exception as e:
             logger.debug("Не удалось извлечь ФИО из payload: %s", e)
             return None, None
@@ -537,12 +514,9 @@ class MeetingService:
         self, meeting_info: Dict[str, Any]
     ) -> Optional[datetime]:
         """
-        Парсит дату/время совещания из meeting (БД или json).
-        Поддерживает: datetime_utc (из БД), datetime (ISO), date + time.
+        Парсит дату/время совещания из meeting (БД).
+        Поддерживает: datetime (ISO), date + time.
         """
-        dt_utc = meeting_info.get("datetime_utc")
-        if isinstance(dt_utc, datetime):
-            return dt_utc
         dt_str = meeting_info.get("datetime")
         if dt_str:
             try:
@@ -584,6 +558,11 @@ class MeetingService:
         """Возвращает дату/время активного совещания из БД или None."""
         return self.meeting_repo.get_meeting_datetime()
 
+    def _get_meeting_id(self) -> Optional[int]:
+        """Возвращает ID активного собрания или None."""
+        info = self.meeting_repo.get_meeting_info()
+        return info.get("meeting_id") if info else None
+
     def get_meeting_datetime_display(self) -> str:
         """
         Возвращает строку даты и времени совещания для отображения.
@@ -611,11 +590,10 @@ class MeetingService:
 
     def get_voted_users(self) -> list:
         """
-        Возвращает список проголосовавших по текущему совещанию.
-        Отметки ✅/❌ показываются только за это совещание.
+        Возвращает список проголосовавших по текущему (активному) собранию.
         """
-        meeting_dt = self._get_meeting_datetime()
-        return self.storage.get_users_with_answers(meeting_datetime=meeting_dt)
+        meeting_id = self._get_meeting_id()
+        return self.storage.get_users_with_answers(meeting_id=meeting_id)
 
     def save_answer(
         self,
@@ -625,55 +603,33 @@ class MeetingService:
         workspace_id: Optional[int] = None,
     ) -> bool:
         """
-        Сохраняет ответ пользователя в таблицу (по пользователю и дате совещания)
+        Сохраняет ответ в Invited (по email и meeting_id)
         и при включённой настройке отправляет на бэкенд.
-
-        Args:
-            sender_id: ID отправителя.
-            answer: Текст ответа для сохранения (из answer_text в config).
-            group_id: ID группы (из события).
-            workspace_id: ID рабочего пространства (из события).
-
-        Returns:
-            True если ответ сохранён в таблицу.
         """
-        meeting_dt = self._get_meeting_datetime()
-        user_data = self.storage.update_user_answer(
-            sender_id=sender_id,
+        meeting_id = self._get_meeting_id()
+        if not meeting_id:
+            logger.error("Нет активного собрания")
+            return False
+        if group_id is None or workspace_id is None:
+            logger.error("Нужны group_id и workspace_id для сохранения ответа")
+            return False
+        user = self.user_repo.get_by_chat(sender_id, group_id, workspace_id)
+        if not user or not user.email:
+            logger.error("Пользователь не найден или нет email: sender_id=%s", sender_id)
+            return False
+        if not self.storage.update_invited_answer(
+            email=user.email,
+            meeting_id=meeting_id,
             answer=answer,
-            status="pending",
-            group_id=group_id,
-            workspace_id=workspace_id,
-            meeting_datetime=meeting_dt,
-        )
-
-        if not user_data:
+            status="answered",
+            full_name=user.full_name,
+            phone=user.phone,
+        ):
             logger.error(
-                "Не удалось сохранить ответ: sender_id=%s, group_id=%s, workspace_id=%s, meeting_datetime=%s",
-                sender_id, group_id, workspace_id, meeting_dt,
+                "Не удалось сохранить ответ: sender_id=%s, meeting_id=%s",
+                sender_id, meeting_id,
             )
             return False
-
-        if app_config.send_to_backend:
-            if self.api_client.send_meeting_response(user_data):
-                self.storage.update_user_answer(
-                    sender_id=sender_id,
-                    answer=answer,
-                    status="sent",
-                    group_id=group_id,
-                    workspace_id=workspace_id,
-                    meeting_datetime=meeting_dt,
-                )
-            else:
-                logger.warning(
-                    "Не удалось отправить данные на бэкенд: sender_id=%s",
-                    sender_id,
-                )
-        else:
-            logger.debug(
-                "Отправка на бэкенд отключена (SEND_TO_BACKEND), данные только в таблице"
-            )
-
         return True
     
     def process_sse_event(self, event_data: Dict[str, Any]) -> None:
@@ -739,31 +695,31 @@ class MeetingService:
                 event_data.get("job_title")
             )
             
-            last_name = (
-                sender_data.get("last_name") or
-                sender_data.get("surname") or
-                event_data.get("last_name")
-            )
-            
-            middle_name = (
-                sender_data.get("middle_name") or
-                event_data.get("middle_name")
-            )
-            
-            first_name = (
-                sender_data.get("first_name") or
-                sender_data.get("name") or
-                event_data.get("first_name")
-            )
-            
+            # SSE присылает last_name, first_name, middle_name
+            sse_data = {
+                "last_name": (
+                    sender_data.get("last_name") or
+                    sender_data.get("surname") or
+                    event_data.get("last_name")
+                ),
+                "first_name": (
+                    sender_data.get("first_name") or
+                    sender_data.get("name") or
+                    event_data.get("first_name")
+                ),
+                "middle_name": (
+                    sender_data.get("middle_name") or
+                    event_data.get("middle_name")
+                ),
+            }
+            full_name = _build_full_name(sse_data)
+
             # Данные пользователя в БД не сохраняем при входе в чат (SSE).
             # Сохранение выполняется только при голосовании (sync_user_from_event в handler).
             logger.info(
-                "SSE MESSAGE: sender_id=%s ФИО=[%s %s %s] email=%s (данные в БД сохраняются при голосовании)",
+                "SSE MESSAGE: sender_id=%s full_name=%s email=%s (данные в БД сохраняются при голосовании)",
                 sender_id,
-                last_name or "",
-                first_name or "",
-                middle_name or "",
+                full_name,
                 email or "нет",
             )
             logger.info(

@@ -9,6 +9,7 @@ from messenger_bot_api import MessageBotEvent, InlineMessageButton, MessageReque
 from .service import MeetingService
 from .config_manager import MeetingConfigManager
 from .create_meeting_flow import CreateMeetingFlow
+from .edit_meeting_flow import EditMeetingFlow
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,11 @@ class MeetingHandler:
         self.config = MeetingConfigManager()
         self.service = MeetingService(config_manager=self.config)
         self.create_meeting_flow = CreateMeetingFlow()
+        self.edit_meeting_flow = EditMeetingFlow()
     
     def handle_message(self, event: MessageBotEvent) -> None:
         """Обрабатывает входящее сообщение."""
+        self.service.sync_user_to_users_table(event)
         if not self.service.check_user_allowed(event):
             event.reply_text(self.config.get_message("not_allowed"))
             return
@@ -60,15 +63,29 @@ class MeetingHandler:
             command = "invited"
 
         if command:
-            if command == "skip" and self.create_meeting_flow.is_active(event):
-                msg = self.create_meeting_flow.try_skip(event, self.service.meeting_repo.create_new_meeting)
-                event.reply_text(msg[0])
-                return
             if command == "skip":
-                event.reply_text("Команда /пропустить доступна только для необязательных полей (место, ссылка).")
+                if self.create_meeting_flow.is_active(event):
+                    msg = self.create_meeting_flow.try_skip(
+                        event, self.service.meeting_repo.create_new_meeting
+                    )
+                    event.reply_text(msg[0])
+                    return
+                if self.edit_meeting_flow.is_active(event):
+                    msg = self.edit_meeting_flow.try_skip(
+                        event, self.service.meeting_repo.update_active_meeting
+                    )
+                    event.reply_text(msg[0])
+                    return
+                event.reply_text(
+                    "Команда /пропустить доступна только для необязательных "
+                    "полей (место, ссылка)."
+                )
                 return
-            if command != "cancel" and self.create_meeting_flow.is_active(event):
-                self.create_meeting_flow.cancel(event)
+            if command != "cancel":
+                if self.create_meeting_flow.is_active(event):
+                    self.create_meeting_flow.cancel(event)
+                if self.edit_meeting_flow.is_active(event):
+                    self.edit_meeting_flow.cancel(event)
             self._handle_command(event, command)
             return
 
@@ -80,10 +97,19 @@ class MeetingHandler:
             event.reply_text(msg)
             return
 
+        # Пользователь в диалоге редактирования собрания — обрабатываем ввод
+        if self.edit_meeting_flow.is_active(event):
+            msg, _ = self.edit_meeting_flow.process(
+                event, text, self.service.meeting_repo.update_active_meeting
+            )
+            event.reply_text(msg)
+            return
+
         self._show_help(event)
     
     def handle_callback(self, event: MessageBotEvent) -> None:
         """Обрабатывает callback от кнопки."""
+        self.service.sync_user_to_users_table(event)
         if not self.service.check_user_allowed(event):
             event.reply_text(self.config.get_message("not_allowed"))
             return
@@ -107,7 +133,7 @@ class MeetingHandler:
             self._handle_create_meeting(event)
 
         elif callback_data == "meeting_edit":
-            event.reply_text("⏳ Функция «Изменить» в разработке.")
+            self._handle_edit_meeting(event)
 
         elif callback_data == "meeting_move":
             event.reply_text("⏳ Функция «Перенести» в разработке.")
@@ -195,17 +221,70 @@ class MeetingHandler:
     
     def _handle_meeting_menu(self, event: MessageBotEvent) -> None:
         """Команда /собрание — меню с кнопками: Создать, Изменить, Перенести."""
-        message = "📋 **Собрание**\n\nВыберите действие:"
+        self._show_meeting_menu(event)
+
+    def _get_meeting_menu_buttons(self) -> list:
+        """
+        Формирует кнопки меню собрания.
+        Кнопки «Изменить» и «Перенести» показываются только при наличии активного собрания.
+        """
+        has_meeting = bool(self.service.meeting_repo.get_meeting_info())
         buttons = [
             InlineMessageButton(id=1, label="✨ Создать", callback_message="✨ Создать", callback_data="meeting_create"),
-            InlineMessageButton(id=2, label="✏️ Изменить", callback_message="✏️ Изменить", callback_data="meeting_edit"),
-            InlineMessageButton(id=3, label="📅 Перенести", callback_message="📅 Перенести", callback_data="meeting_move"),
         ]
+        if has_meeting:
+            buttons.append(
+                InlineMessageButton(
+                    id=2, label="✏️ Изменить",
+                    callback_message="✏️ Изменить", callback_data="meeting_edit"
+                ),
+            )
+            buttons.append(
+                InlineMessageButton(id=3, label="📅 Перенести", callback_message="📅 Перенести", callback_data="meeting_move"),
+            )
+        return buttons
+
+    def _show_meeting_menu(self, event: MessageBotEvent) -> None:
+        """Отправляет меню собрания с кнопками (Создать, Изменить и Перенести при наличии собрания)."""
+        message = "📋 **Собрание**\n\nВыберите действие:"
+        buttons = self._get_meeting_menu_buttons()
         try:
             event.reply_text_message(MessageRequest(text=message, buttons=buttons))
         except Exception as e:
             logger.error("Ошибка отправки меню собрания: %s", e)
             event.reply_text(message)
+
+    def _handle_edit_meeting(self, event: MessageBotEvent) -> None:
+        """
+        Редактирование собрания — только для админов.
+        Если активного собрания нет — сообщение и кнопки меню.
+        Иначе — диалог редактирования (как при создании).
+        """
+        email = self.service.get_user_email(event)
+        if not email:
+            event.reply_text(
+                "❌ Для изменения собрания необходим email в профиле. "
+                "Укажите email в настройках K-Chat."
+            )
+            return
+        if not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("create_meeting_not_admin")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        meeting_info = self.service.meeting_repo.get_meeting_info()
+        if not meeting_info:
+            message = "ℹ️ Изменять нечего — активных собраний нет.\n\nВыберите действие:"
+            buttons = self._get_meeting_menu_buttons()
+            try:
+                event.reply_text_message(MessageRequest(text=message, buttons=buttons))
+            except Exception as e:
+                logger.error("Ошибка отправки меню собрания: %s", e)
+                event.reply_text(message)
+            return
+        msg = self.edit_meeting_flow.start(event, meeting_info)
+        event.reply_text(msg)
 
     def _handle_create_meeting(self, event: MessageBotEvent) -> None:
         """
@@ -229,10 +308,15 @@ class MeetingHandler:
         event.reply_text(msg)
 
     def _handle_cancel(self, event: MessageBotEvent) -> None:
-        """Команда /отмена — отмена диалога создания собрания."""
+        """Команда /отмена — отмена диалога создания или редактирования собрания."""
         if self.create_meeting_flow.is_active(event):
             msg = self.create_meeting_flow.cancel(event)
             event.reply_text(msg)
+            self._show_help(event)
+        elif self.edit_meeting_flow.is_active(event):
+            msg = self.edit_meeting_flow.cancel(event)
+            event.reply_text(msg)
+            self._show_help(event)
         else:
             event.reply_text("Нет активного диалога для отмены.")
 
@@ -316,55 +400,16 @@ class MeetingHandler:
         ✅ если ответ «да», ❌ если «нет»; только у проголосовавших.
         """
         invited = self.service.get_invited_list()
-        voted = self.service.get_voted_users()
-        vote_by_fio = {}
-        vote_by_email = {}
-        vote_by_email_local = {}
-        vote_by_phone = {}
-        for v in voted:
-            fio_str = v.get("fio") or ""
-            fio_norm = self._normalize_fio(fio_str)
-            if fio_norm:
-                vote_by_fio[fio_norm] = v.get("answer")
-            email_val = (v.get("email") or "").strip().lower()
-            if email_val:
-                vote_by_email[email_val] = v.get("answer")
-                local = email_val.split("@")[0] if "@" in email_val else email_val
-                if local:
-                    vote_by_email_local[local] = v.get("answer")
-            phone_val = (v.get("phone") or "").strip()
-            if phone_val:
-                vote_by_phone[phone_val] = v.get("answer")
         dt_display = self.service.get_meeting_datetime_display()
         header = f"👥 **Приглашённые** ({dt_display})" if dt_display else "👥 **Приглашённые**"
         lines = [header]
         for inv in invited:
-            parts = [
-                inv.get("last_name"),
-                inv.get("first_name"),
-                inv.get("middle_name"),
-            ]
-            parts = [p.strip() for p in parts if p and str(p).strip()]
-            fio = " ".join(parts) if parts else "—"
+            fio = (inv.get("full_name") or "").strip() or "—"
             contact = inv.get("phone") or inv.get("email") or ""
-            fio_norm = self._normalize_fio(fio)
-            email_norm = (inv.get("email") or "").strip().lower()
-            phone_val = (inv.get("phone") or "").strip()
-            email_local = email_norm.split("@")[0] if "@" in email_norm else ""
-            answer = (
-                (vote_by_fio.get(fio_norm) if fio_norm else None)
-                or (vote_by_email.get(email_norm) if email_norm else None)
-                or (vote_by_email_local.get(email_local) if email_local else None)
-                or (vote_by_phone.get(phone_val) if phone_val else None)
-            )
-            if answer is None and fio_norm and vote_by_fio:
-                for voted_fio, ans in vote_by_fio.items():
-                    if voted_fio in fio_norm or fio_norm in voted_fio:
-                        answer = ans
-                        break
-            if self._answer_is_yes(answer or ""):
+            answer = inv.get("answer") or ""
+            if self._answer_is_yes(answer):
                 icon = "✅ "
-            elif self._answer_is_no(answer or ""):
+            elif self._answer_is_no(answer):
                 icon = "❌ "
             else:
                 icon = ""
@@ -426,6 +471,9 @@ class MeetingHandler:
                 logger.exception("Не удалось отправить сообщение об ошибке")
     
     def _show_help(self, event: MessageBotEvent) -> None:
-        """Показывает справку."""
-        message = self.config.get_message("help")
+        """Показывает справку. Для админов — без строки /информация."""
+        email = self.service.get_user_email(event)
+        is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+        key = "help_admin" if is_admin else "help"
+        message = self.config.get_message(key) or self.config.get_message("help")
         event.reply_text(message)

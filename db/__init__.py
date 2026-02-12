@@ -7,8 +7,9 @@ from .models import (
     Invited,
     Meeting,
     MeetingAdmin,
-    MeetingUser,
+    User,
 )
+from .user_repository import UserRepository
 from .session import (
     get_engine,
     get_session,
@@ -22,7 +23,8 @@ __all__ = [
     'Invited',
     'Meeting',
     'MeetingAdmin',
-    'MeetingUser',
+    'User',
+    'UserRepository',
     'get_engine',
     'get_session',
     'get_session_context',

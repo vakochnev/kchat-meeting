@@ -1,51 +1,27 @@
 """
-Диалог создания нового собрания (только для админов).
+Диалог редактирования активного собрания (только для админов).
 Пошаговый ввод с валидацией: topic, date, time, place, link.
 """
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
+from .create_meeting_flow import (
+    CREATE_MEETING_STEPS,
+    SKIP_HINT,
+    MAX_TOPIC_LEN,
+    MAX_PLACE_LEN,
+    MAX_LINK_LEN,
+)
+
+EDIT_EDIT_CANCEL_HINT = "\n\n/отмена — отменить редактирование"
 from .validators import validate_meeting_date, validate_meeting_time
 
 logger = logging.getLogger(__name__)
 
-MAX_TOPIC_LEN = 500
-MAX_PLACE_LEN = 255
-MAX_LINK_LEN = 500
-CANCEL_HINT = "\n\n/отмена — отменить создание"
-SKIP_HINT = "\n/пропустить — к следующему полю"
 
-
-# Описание шагов диалога: label — текст запроса, hint — подсказка (выводится после label)
-CREATE_MEETING_STEPS = {
-    "topic": {
-        "label": "✏️ Введите **тему** собрания:",
-        "hint": "Например: «Планирование квартала»",
-    },
-    "date": {
-        "label": "📅 Введите **дату**:",
-        "hint": "Формат дд.мм.гггг",
-    },
-    "time": {
-        "label": "🕐 Введите **время**:",
-        "hint": "Формат чч:мм",
-    },
-    "place": {
-        "label": "📍 Введите **место** проведения:",
-        "hint": "Например: Зал конференций или пропустите",
-    },
-    "link": {
-        "label": "🔗 Введите **ссылку** на подключение:",
-        "hint": "Например: https://meet.example.com или пропустите",
-    },
-}
-
-
-def _build_success_message(data: Dict[str, Any]) -> str:
-    """Формирует итоговое сообщение о созданном собрании (без пустых место/ссылка)."""
+def _build_meeting_display(data: Dict[str, Any]) -> str:
+    """Формирует блок «Данные собрания» (как итоговое окно при создании)."""
     lines = [
-        "✅ **Собрание успешно создано!**",
-        "",
         "**Данные собрания:**",
         f"📅 Тема: {data.get('topic', '')}",
         f"🕐 Дата: {data.get('date', '')} время: {data.get('time', '')}",
@@ -54,17 +30,12 @@ def _build_success_message(data: Dict[str, Any]) -> str:
         lines.append(f"📍 Место проведения: {data['place']}")
     if data.get("link"):
         lines.append(f"🔗 Ссылка: {data['link']}")
-    lines.extend([
-        "",
-        "👥 Далее пригласите сотрудников.",
-        "/приглашенные — просмотр списка приглашённых и их ответов.",
-    ])
     return "\n".join(lines)
 
 
-def _build_header(data: Dict[str, Any]) -> str:
-    """Формирует заголовок с собранными данными о собрании."""
-    lines = ["📋 **Создание нового собрания**"]
+def _build_edit_header(data: Dict[str, Any]) -> str:
+    """Заголовок с собранными данными при редактировании."""
+    lines = ["✏️ **Редактирование собрания**"]
     if data.get("topic"):
         lines.append(f"✏️ Тема: {data['topic']}")
     if data.get("date"):
@@ -78,9 +49,21 @@ def _build_header(data: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-class CreateMeetingFlow:
+def _build_edit_success_message(data: Dict[str, Any]) -> str:
+    """Сообщение об успешном изменении собрания."""
+    lines = [
+        "✅ **Собрание успешно изменено!**",
+        "",
+        _build_meeting_display(data),
+        "",
+        "👥 /приглашенные — просмотр списка приглашённых и их ответов.",
+    ]
+    return "\n".join(lines)
+
+
+class EditMeetingFlow:
     """
-    Управление состоянием диалога создания собрания.
+    Управление состоянием диалога редактирования собрания.
     Ключ: (sender_id, group_id, workspace_id).
     """
 
@@ -98,19 +81,41 @@ class CreateMeetingFlow:
         """Есть ли активный диалог для этого пользователя."""
         return self._key(event) in self._state
 
-    def start(self, event: Any) -> str:
-        """Начинает диалог, возвращает первый запрос."""
+    def start(
+        self, event: Any, meeting_info: Dict[str, Any]
+    ) -> str:
+        """
+        Начинает диалог с данными текущего собрания.
+        Показывает блок «Данные собрания» и первый запрос (тема).
+        """
         k = self._key(event)
-        self._state[k] = {"step": "topic", "data": {}}
-        return self._get_step_prompt("topic", {})
+        data = {
+            "topic": meeting_info.get("topic") or "",
+            "date": meeting_info.get("date") or "",
+            "time": meeting_info.get("time") or "",
+            "place": meeting_info.get("place"),
+            "link": meeting_info.get("link"),
+        }
+        self._state[k] = {"step": "topic", "data": data}
+        display = _build_meeting_display(data)
+        header = f"✏️ **Редактирование собрания**\n\n{display}"
+        step_cfg = CREATE_MEETING_STEPS.get("topic", {})
+        label = step_cfg.get("label", "")
+        hint = step_cfg.get("hint", "")
+        suffix = EDIT_EDIT_CANCEL_HINT
+        parts = [f"{header}\n\n{label}"]
+        if hint:
+            parts.append(f"\n{hint}")
+        parts.append(suffix)
+        return "".join(parts)
 
     def _get_step_prompt(self, step: str, data: Dict[str, Any]) -> str:
         """Формирует запрос для шага: header, label, hint, /отмена."""
-        header = _build_header(data)
+        header = _build_edit_header(data)
         step_cfg = CREATE_MEETING_STEPS.get(step, {})
         label = step_cfg.get("label", "")
         hint = step_cfg.get("hint", "")
-        base = CANCEL_HINT
+        base = EDIT_EDIT_CANCEL_HINT
         suffix = f"{base}{SKIP_HINT}" if step in ("place", "link") else base
         if not label:
             return header
@@ -121,7 +126,7 @@ class CreateMeetingFlow:
         return "".join(parts)
 
     def try_skip(
-        self, event: Any, create_fn: Callable[..., int]
+        self, event: Any, update_fn: Callable[..., int]
     ) -> Tuple[str, bool]:
         """
         Пропуск необязательного поля (место, ссылка).
@@ -143,7 +148,7 @@ class CreateMeetingFlow:
         if step == "link":
             data["link"] = None
             try:
-                create_fn(
+                update_fn(
                     topic=data["topic"],
                     date=data["date"],
                     time=data["time"],
@@ -151,10 +156,10 @@ class CreateMeetingFlow:
                     link=data.get("link"),
                 )
                 self._state.pop(k, None)
-                return (_build_success_message(data), True)
+                return (_build_edit_success_message(data), True)
             except Exception as e:
-                logger.exception("Ошибка создания собрания: %s", e)
-                return f"❌ Ошибка при создании собрания: {e}", True
+                logger.exception("Ошибка обновления собрания: %s", e)
+                return f"❌ Ошибка при изменении собрания: {e}", True
 
         return "Поле обязательно. Введите значение или используйте /отмена.", False
 
@@ -162,13 +167,13 @@ class CreateMeetingFlow:
         """Отменяет диалог."""
         k = self._key(event)
         self._state.pop(k, None)
-        return "❌ Создание собрания отменено."
+        return "❌ Редактирование собрания отменено."
 
     def process(
         self,
         event: Any,
         text: str,
-        create_fn: Callable[..., int],
+        update_fn: Callable[..., int],
     ) -> Tuple[str, bool]:
         """
         Обрабатывает ввод пользователя.
@@ -186,11 +191,20 @@ class CreateMeetingFlow:
         if step == "topic":
             val = text.strip()
             if not val:
-                header = _build_header({})
-                return f"{header}{CANCEL_HINT}\n\n❌ Тема не может быть пустой. Введите тему собрания:", False
+                header = _build_edit_header(data)
+                return (
+                    f"{header}{EDIT_CANCEL_HINT}\n\n"
+                    "❌ Тема не может быть пустой. Введите тему собрания:",
+                    False,
+                )
             if len(val) > MAX_TOPIC_LEN:
-                header = _build_header({})
-                return f"{header}{CANCEL_HINT}\n\n❌ Тема слишком длинная (макс. {MAX_TOPIC_LEN} символов). Сократите:", False
+                header = _build_edit_header(data)
+                return (
+                    f"{header}{EDIT_CANCEL_HINT}\n\n"
+                    f"❌ Тема слишком длинная (макс. {MAX_TOPIC_LEN} символов). "
+                    "Сократите:",
+                    False,
+                )
             data["topic"] = val
             state["step"] = "date"
             return (self._get_step_prompt("date", data), False)
@@ -198,8 +212,11 @@ class CreateMeetingFlow:
         if step == "date":
             is_valid, normalized, error_msg = validate_meeting_date(text)
             if not is_valid:
-                header = _build_header(data)
-                err = f"{header}{CANCEL_HINT}\n\n{error_msg or '❌ Неверный формат даты.'}"
+                header = _build_edit_header(data)
+                err = (
+                    f"{header}{EDIT_CANCEL_HINT}\n\n"
+                    f"{error_msg or '❌ Неверный формат даты.'}"
+                )
                 return (err, False)
             data["date"] = normalized
             state["step"] = "time"
@@ -208,8 +225,11 @@ class CreateMeetingFlow:
         if step == "time":
             is_valid, normalized, error_msg = validate_meeting_time(text)
             if not is_valid:
-                header = _build_header(data)
-                err = f"{header}{CANCEL_HINT}\n\n{error_msg or '❌ Неверный формат времени.'}"
+                header = _build_edit_header(data)
+                err = (
+                    f"{header}{EDIT_CANCEL_HINT}\n\n"
+                    f"{error_msg or '❌ Неверный формат времени.'}"
+                )
                 return (err, False)
             data["time"] = normalized
             state["step"] = "place"
@@ -221,11 +241,11 @@ class CreateMeetingFlow:
                 data["place"] = None
             else:
                 if len(val) > MAX_PLACE_LEN:
-                    header = _build_header(data)
+                    header = _build_edit_header(data)
                     return (
                         f"{header}\n\n"
                         f"❌ Место слишком длинное (макс. {MAX_PLACE_LEN} символов):"
-                        f"{SKIP_HINT}{CANCEL_HINT}",
+                        f"{SKIP_HINT}{EDIT_CANCEL_HINT}",
                         False,
                     )
                 data["place"] = val or None
@@ -238,17 +258,16 @@ class CreateMeetingFlow:
                 data["link"] = None
             else:
                 if len(val) > MAX_LINK_LEN:
-                    header = _build_header(data)
+                    header = _build_edit_header(data)
                     return (
-                        f"{header}{SKIP_HINT}{CANCEL_HINT}\n\n"
+                        f"{header}{SKIP_HINT}{EDIT_CANCEL_HINT}\n\n"
                         f"❌ Ссылка слишком длинная (макс. {MAX_LINK_LEN} символов):",
                         False,
                     )
                 data["link"] = val or None
 
-            # Все поля собраны — создаём
             try:
-                create_fn(
+                update_fn(
                     topic=data["topic"],
                     date=data["date"],
                     time=data["time"],
@@ -256,9 +275,9 @@ class CreateMeetingFlow:
                     link=data.get("link"),
                 )
                 self._state.pop(k, None)
-                return (_build_success_message(data), True)
+                return (_build_edit_success_message(data), True)
             except Exception as e:
-                logger.exception("Ошибка создания собрания: %s", e)
-                return f"❌ Ошибка при создании собрания: {e}", True
+                logger.exception("Ошибка обновления собрания: %s", e)
+                return f"❌ Ошибка при изменении собрания: {e}", True
 
         return "Неизвестный шаг.", True

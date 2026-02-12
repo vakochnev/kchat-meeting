@@ -44,18 +44,6 @@ class Config:
             "https://pusher.kchat.app"
         )
     )
-    backend_api_url: str = field(
-        default_factory=lambda: os.getenv("BACKEND_API_URL", "")
-    )
-    backend_api_token: Optional[str] = field(
-        default_factory=lambda: os.getenv("BACKEND_API_TOKEN")
-    )
-    # Отправка ответов на бэкенд (true/1/yes — включена, false/0/no — только таблица)
-    send_to_backend: bool = field(
-        default_factory=lambda: os.getenv("SEND_TO_BACKEND", "false").lower()
-        in ("true", "1", "yes", "on")
-    )
-    
     # База данных
     database_url: str = field(
         default_factory=lambda: os.getenv(
