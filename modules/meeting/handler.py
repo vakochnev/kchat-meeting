@@ -2,7 +2,8 @@
 Обработчик событий совещаний.
 """
 import logging
-from typing import Dict, Any
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from messenger_bot_api import MessageBotEvent, InlineMessageButton, MessageRequest
 
@@ -10,6 +11,8 @@ from .service import MeetingService
 from .config_manager import MeetingConfigManager
 from .create_meeting_flow import CreateMeetingFlow
 from .edit_meeting_flow import EditMeetingFlow
+from .add_invited_flow import AddInvitedFlow
+from .edit_delete_invited_flow import EditDeleteInvitedFlow
 
 logger = logging.getLogger(__name__)
 
@@ -42,20 +45,27 @@ class MeetingHandler:
         self.service = MeetingService(config_manager=self.config)
         self.create_meeting_flow = CreateMeetingFlow()
         self.edit_meeting_flow = EditMeetingFlow()
+        self.add_invited_flow = AddInvitedFlow()
+        self.edit_delete_invited_flow = EditDeleteInvitedFlow()
     
     def handle_message(self, event: MessageBotEvent) -> None:
         """Обрабатывает входящее сообщение."""
+        text = (event.message_text or "").strip()
+        logger.debug(
+            "handle_message: sender_id=%s group_id=%s workspace_id=%s text_len=%d text=%r",
+            getattr(event, "sender_id", None),
+            getattr(event, "group_id", None),
+            getattr(event, "workspace_id", None),
+            len(text),
+            text[:200] if text else "",
+        )
         self.service.sync_user_to_users_table(event)
         if not self.service.check_user_allowed(event):
             event.reply_text(self.config.get_message("not_allowed"))
             return
 
-        text = (event.message_text or "").strip()
-        
         if not text:
             return
-        
-        logger.debug("Сообщение от %s: %s", event.sender_id, text[:50])
         
         text_lower = text.lower()
         command = COMMANDS.get(text_lower)
@@ -65,9 +75,22 @@ class MeetingHandler:
         if command:
             if command == "skip":
                 if self.create_meeting_flow.is_active(event):
-                    msg = self.create_meeting_flow.try_skip(
-                        event, self.service.meeting_repo.create_new_meeting
-                    )
+                    move_from = self.create_meeting_flow.get_move_from_meeting_id(event)
+                    if move_from is not None:
+
+                        def create_and_copy_invited(*args, **kwargs):
+                            new_id = self.service.meeting_repo.create_new_meeting(
+                                *args, **kwargs
+                            )
+                            copied = self.service.meeting_repo.copy_invited_to_meeting(
+                                move_from, new_id
+                            )
+                            return (new_id, copied)
+
+                        create_fn = create_and_copy_invited
+                    else:
+                        create_fn = self.service.meeting_repo.create_new_meeting
+                    msg = self.create_meeting_flow.try_skip(event, create_fn)
                     event.reply_text(msg[0])
                     return
                 if self.edit_meeting_flow.is_active(event):
@@ -86,14 +109,29 @@ class MeetingHandler:
                     self.create_meeting_flow.cancel(event)
                 if self.edit_meeting_flow.is_active(event):
                     self.edit_meeting_flow.cancel(event)
+                if self.add_invited_flow.is_active(event):
+                    self.add_invited_flow.cancel(event)
+                if self.edit_delete_invited_flow.is_active(event):
+                    self.edit_delete_invited_flow.cancel(event)
             self._handle_command(event, command)
             return
 
-        # Пользователь в диалоге создания собрания — обрабатываем ввод
+        # Пользователь в диалоге создания собрания (или переноса) — обрабатываем ввод
         if self.create_meeting_flow.is_active(event):
-            msg, done = self.create_meeting_flow.process(
-                event, text, self.service.meeting_repo.create_new_meeting
-            )
+            move_from = self.create_meeting_flow.get_move_from_meeting_id(event)
+            if move_from is not None:
+
+                def create_and_copy_invited(*args, **kwargs):
+                    new_id = self.service.meeting_repo.create_new_meeting(*args, **kwargs)
+                    copied = self.service.meeting_repo.copy_invited_to_meeting(
+                        move_from, new_id
+                    )
+                    return (new_id, copied)
+
+                create_fn = create_and_copy_invited
+            else:
+                create_fn = self.service.meeting_repo.create_new_meeting
+            msg, done = self.create_meeting_flow.process(event, text, create_fn)
             event.reply_text(msg)
             return
 
@@ -104,6 +142,59 @@ class MeetingHandler:
             )
             event.reply_text(msg)
             return
+
+        # Ожидание email для удаления приглашённого
+        if self.edit_delete_invited_flow.is_active(event):
+            msg, done = self.edit_delete_invited_flow.process(
+                event,
+                text,
+                self.service.meeting_repo.delete_invited_by_email,
+            )
+            event.reply_text(msg)
+            if done:
+                self._handle_invited(event, skip_parse_and_save=True)
+            return
+
+        # Ожидание списка приглашённых (отдельным сообщением)
+        add_invited_active = self.add_invited_flow.is_active(event)
+        logger.debug(
+            "handle_message: add_invited_flow.is_active=%s",
+            add_invited_active,
+        )
+        if add_invited_active:
+            msg, done = self.add_invited_flow.process(
+                event,
+                text,
+                self._parse_invited_list,
+                self.service.meeting_repo.save_invited_batch,
+            )
+            event.reply_text(msg)
+            if done:
+                self._handle_invited(event, skip_parse_and_save=True)
+            return
+
+        # Список без /приглашенные добавить — парсим и сохраняем, если админ и есть собрание
+        meeting_info = self.service.get_meeting_info()
+        meeting_id = meeting_info.get("meeting_id") if meeting_info else None
+        email = self.service.get_user_email(event)
+        is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+        if is_admin and meeting_id:
+            parsed = self._parse_invited_list(text)
+            if parsed:
+                try:
+                    added = self.service.meeting_repo.save_invited_batch(
+                        meeting_id, parsed
+                    )
+                    if added > 0:
+                        event.reply_text(
+                            f"✅ **Данные сохранены.** ✨ Добавлено: **{added}** чел."
+                        )
+                        self._handle_invited(event, skip_parse_and_save=True)
+                    return
+                except Exception as e:
+                    logger.exception("Ошибка сохранения приглашённых: %s", e)
+                    event.reply_text("❌ Ошибка при сохранении в базу данных.")
+                    return
 
         self._show_help(event)
     
@@ -136,29 +227,24 @@ class MeetingHandler:
             self._handle_edit_meeting(event)
 
         elif callback_data == "meeting_move":
-            event.reply_text("⏳ Функция «Перенести» в разработке.")
+            self._handle_move_meeting(event)
+
+        elif callback_data == "invited_add":
+            self._handle_invited_add(event)
+
+        elif callback_data == "invited_delete":
+            self._handle_invited_delete(event)
         
         else:
             logger.warning("Неизвестный callback: %s", callback_data)
     
     def handle_sse_event(self, event_data: Dict[str, Any]) -> None:
         """
-        Обрабатывает событие из SSE.
-        
-        Args:
-            event_data: Данные события из SSE.
+        Обрабатывает событие из SSE (логирование, sync).
+        Добавление приглашённых — только через MessageHandler в ответ на команду
+        /приглашенные (избегаем повторной записи при получении старых сообщений).
         """
-        logger.debug("SSE событие получено: %s", event_data.get("type", "unknown"))
-        
-        # Обрабатываем событие через сервис
         self.service.process_sse_event(event_data)
-        
-        # Если это событие сообщения, можем проверить пользователя
-        event_type = event_data.get("type")
-        if event_type == "MESSAGE":
-            # Здесь можно добавить логику проверки и опроса
-            # Но обычно это делается при команде /start
-            pass
     
     def _handle_command(self, event: MessageBotEvent, command: str) -> None:
         """Обрабатывает команду."""
@@ -226,23 +312,26 @@ class MeetingHandler:
     def _get_meeting_menu_buttons(self) -> list:
         """
         Формирует кнопки меню собрания.
-        Кнопки «Изменить» и «Перенести» показываются только при наличии активного собрания.
+        При наличии собрания: «Изменить», «Перенести». Иначе: только «Создать».
         """
         has_meeting = bool(self.service.meeting_repo.get_meeting_info())
-        buttons = [
-            InlineMessageButton(id=1, label="✨ Создать", callback_message="✨ Создать", callback_data="meeting_create"),
-        ]
         if has_meeting:
-            buttons.append(
+            return [
                 InlineMessageButton(
                     id=2, label="✏️ Изменить",
                     callback_message="✏️ Изменить", callback_data="meeting_edit"
                 ),
-            )
-            buttons.append(
-                InlineMessageButton(id=3, label="📅 Перенести", callback_message="📅 Перенести", callback_data="meeting_move"),
-            )
-        return buttons
+                InlineMessageButton(
+                    id=3, label="📅 Перенести",
+                    callback_message="📅 Перенести", callback_data="meeting_move"
+                ),
+            ]
+        return [
+            InlineMessageButton(
+                id=1, label="✨ Создать",
+                callback_message="✨ Создать", callback_data="meeting_create"
+            ),
+        ]
 
     def _show_meeting_menu(self, event: MessageBotEvent) -> None:
         """Отправляет меню собрания с кнопками (Создать, Изменить и Перенести при наличии собрания)."""
@@ -286,10 +375,47 @@ class MeetingHandler:
         msg = self.edit_meeting_flow.start(event, meeting_info)
         event.reply_text(msg)
 
+    def _handle_move_meeting(self, event: MessageBotEvent) -> None:
+        """
+        Перенос собрания — создание нового с копированием приглашённых (status сброшен).
+        Только для админов, только при наличии текущего собрания.
+        """
+        email = self.service.get_user_email(event)
+        if not email:
+            event.reply_text(
+                "❌ Для переноса собрания необходим email в профиле. "
+                "Укажите email в настройках K-Chat."
+            )
+            return
+        if not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("create_meeting_not_admin")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        meeting_info = self.service.meeting_repo.get_meeting_info()
+        if not meeting_info:
+            message = "ℹ️ Переносить нечего — активных собраний нет.\n\nВыберите действие:"
+            buttons = self._get_meeting_menu_buttons()
+            try:
+                event.reply_text_message(MessageRequest(text=message, buttons=buttons))
+            except Exception as e:
+                logger.error("Ошибка отправки меню собрания: %s", e)
+                event.reply_text(message)
+            return
+        meeting_id = meeting_info.get("meeting_id")
+        msg = self.create_meeting_flow.start(
+            event,
+            move_from_meeting_id=meeting_id,
+            move_from_meeting_info=meeting_info,
+        )
+        event.reply_text(msg)
+
     def _handle_create_meeting(self, event: MessageBotEvent) -> None:
         """
         Создание собрания — только для админов.
         Запускает пошаговый диалог ввода полей (вызов по /создать_собрание или кнопке Создать).
+        Если собрание уже есть — сообщение и предложение «Изменить».
         """
         email = self.service.get_user_email(event)
         if not email:
@@ -304,11 +430,33 @@ class MeetingHandler:
                 or "❌ Команда доступна только администраторам."
             )
             return
+        meeting_info = self.service.meeting_repo.get_meeting_info()
+        if meeting_info:
+            message = (
+                "ℹ️ Собрание уже создано.\n\n"
+                "Для редактирования используйте кнопку «✏️ Изменить» или «📅 Перенести»."
+            )
+            buttons = [
+                InlineMessageButton(
+                    id=2, label="✏️ Изменить",
+                    callback_message="✏️ Изменить", callback_data="meeting_edit"
+                ),
+                InlineMessageButton(
+                    id=3, label="📅 Перенести",
+                    callback_message="📅 Перенести", callback_data="meeting_move"
+                ),
+            ]
+            try:
+                event.reply_text_message(MessageRequest(text=message, buttons=buttons))
+            except Exception as e:
+                logger.error("Ошибка отправки меню собрания: %s", e)
+                event.reply_text(message)
+            return
         msg = self.create_meeting_flow.start(event)
         event.reply_text(msg)
 
     def _handle_cancel(self, event: MessageBotEvent) -> None:
-        """Команда /отмена — отмена диалога создания или редактирования собрания."""
+        """Команда /отмена — отмена активного диалога."""
         if self.create_meeting_flow.is_active(event):
             msg = self.create_meeting_flow.cancel(event)
             event.reply_text(msg)
@@ -317,6 +465,13 @@ class MeetingHandler:
             msg = self.edit_meeting_flow.cancel(event)
             event.reply_text(msg)
             self._show_help(event)
+        elif self.add_invited_flow.is_active(event):
+            msg = self.add_invited_flow.cancel(event)
+            event.reply_text(msg)
+        elif self.edit_delete_invited_flow.is_active(event):
+            msg = self.edit_delete_invited_flow.cancel(event)
+            event.reply_text(msg)
+            self._handle_invited(event, skip_parse_and_save=True)
         else:
             event.reply_text("Нет активного диалога для отмены.")
 
@@ -393,28 +548,246 @@ class MeetingHandler:
             return True
         return False
 
-    def _handle_invited(self, event: MessageBotEvent) -> None:
+    # Разделитель формата: ФИО | email | phone (поддержка " | " и "|")
+    INVITED_LINE_SEP = " | "
+
+    @staticmethod
+    def _parse_invited_line(line: str) -> Optional[Dict[str, str]]:
+        """
+        Парсит строку формата: ФИО | email@example.com | +79991234567.
+        Телефон может быть пустым: ФИО | email |  или ФИО | email.
+        Принимает разделители " | " или "|".
+
+        Returns:
+            dict с ключами full_name, email, phone или None если строка невалидна.
+        """
+        if not line or "|" not in line:
+            return None
+        # Делим по первому " | " или по "|" (гибкий парсинг)
+        if MeetingHandler.INVITED_LINE_SEP in line:
+            parts = [p.strip() for p in line.split(MeetingHandler.INVITED_LINE_SEP, 2)]
+        else:
+            parts = [p.strip() for p in line.split("|", 2)]
+        full_name = (parts[0] or "").strip()
+        if not full_name:
+            return None
+        email = (parts[1] if len(parts) > 1 else "").strip()
+        phone = (parts[2] if len(parts) > 2 else "").strip()
+        return {"full_name": full_name, "email": email or "", "phone": phone or ""}
+
+    @staticmethod
+    def _validate_invited_row(row: Dict[str, str]) -> Tuple[bool, Optional[str]]:
+        """
+        Валидирует запись приглашённого.
+        Требуется: ФИО и хотя бы email или телефон.
+
+        Returns:
+            (is_valid, error_message)
+        """
+        full_name = (row.get("full_name") or "").strip()
+        email = (row.get("email") or "").strip()
+        phone = (row.get("phone") or "").strip()
+        if not full_name:
+            return False, "Пустое ФИО"
+        if not email and not phone:
+            return False, "Укажите email или телефон"
+        if email and not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+            return False, f"Некорректный email: {email}"
+        return True, None
+
+    def _parse_invited_list(self, text: str) -> List[Dict[str, str]]:
+        """
+        Извлекает из текста список приглашённых в формате ФИО | email | phone.
+        Каждая строка — один человек. Пропускает невалидные строки.
+        """
+        result: List[Dict[str, str]] = []
+        lines = text.splitlines()
+        logger.debug("_parse_invited_list: строк=%d %r", len(lines), lines[:5])
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parsed = self._parse_invited_line(line)
+            if parsed:
+                valid, err = self._validate_invited_row(parsed)
+            else:
+                valid, err = False, "не распознано"
+            logger.debug(
+                "_parse_invited_list: line=%r -> parsed=%s valid=%s err=%s",
+                line[:80], parsed, valid, err,
+            )
+            if parsed and valid:
+                result.append(parsed)
+        return result
+
+    def _get_invited_buttons(
+        self,
+        invited: list,
+        is_admin: bool,
+    ) -> list:
+        """
+        Формирует кнопки для экрана приглашённых.
+        Без приглашённых: «Пригласить». С приглашёнными: «Добавить», «Удалить».
+        Только для админов.
+        """
+        if not is_admin:
+            return []
+        if not invited:
+            return [
+                InlineMessageButton(
+                    id=1,
+                    label="👋 Пригласить",
+                    callback_message="👋 Пригласить",
+                    callback_data="invited_add",
+                ),
+            ]
+        return [
+            InlineMessageButton(
+                id=1,
+                label="✨ Добавить",
+                callback_message="✨ Добавить",
+                callback_data="invited_add",
+            ),
+            InlineMessageButton(
+                id=2,
+                label="🗑 Удалить",
+                callback_message="🗑 Удалить",
+                callback_data="invited_delete",
+            ),
+        ]
+
+    def _handle_invited_add(self, event: MessageBotEvent) -> None:
+        """
+        Кнопка «Пригласить»/«Добавить» — запуск диалога добавления списка приглашённых.
+        """
+        meeting_info = self.service.get_meeting_info()
+        if not meeting_info:
+            event.reply_text(
+                "ℹ️ Собраний пока нет.\n\n"
+                "📋 /собрание — создать собрание."
+            )
+            return
+        email = self.service.get_user_email(event)
+        if not email or not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("not_allowed")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        meeting_id = meeting_info.get("meeting_id")
+        msg = self.add_invited_flow.start(event, meeting_id)
+        event.reply_text(msg)
+
+    def _handle_invited_delete(self, event: MessageBotEvent) -> None:
+        """Кнопка «Удалить» — запрос email и удаление приглашённого."""
+        meeting_info = self.service.get_meeting_info()
+        if not meeting_info:
+            event.reply_text(
+                "ℹ️ Собраний пока нет.\n\n"
+                "📋 /собрание — создать собрание."
+            )
+            return
+        email = self.service.get_user_email(event)
+        if not email or not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("not_allowed")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        meeting_id = meeting_info.get("meeting_id")
+        msg = self.edit_delete_invited_flow.start(event, meeting_id)
+        event.reply_text(msg)
+
+    def _handle_invited(
+        self,
+        event: MessageBotEvent,
+        skip_parse_and_save: bool = False,
+    ) -> None:
         """
         Обрабатывает команду /приглашенные: список приглашённых из БД.
-        Отметка по данным из БД: сопоставление по ФИО и дате совещания.
-        ✅ если ответ «да», ❌ если «нет»; только у проголосовавших.
+        ✅/❌ — по полю answer в Invited.
+        Админы: кнопки Пригласить/Добавить, Изменить, Удалить.
+        skip_parse_and_save: True при вызове после add_invited_flow — только показ списка.
         """
+        meeting_info = self.service.get_meeting_info()
+        if not meeting_info:
+            event.reply_text(
+                "ℹ️ Собраний пока нет.\n\n"
+                "📋 /собрание — создать собрание."
+            )
+            return
+
+        text = (event.message_text or "").strip()
+        text_lower = text.lower()
+        meeting_id = meeting_info.get("meeting_id")
+        email = self.service.get_user_email(event)
+        is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+        logger.debug(
+            "_handle_invited: meeting_id=%s email=%s is_admin=%s skip=%s text_len=%d",
+            meeting_id, email, is_admin, skip_parse_and_save, len(text),
+        )
+
+        added_msg = ""
+        if not skip_parse_and_save and is_admin and meeting_id:
+            parsed = self._parse_invited_list(text)
+            logger.debug("_handle_invited: parsed=%d записей", len(parsed))
+            if parsed:
+                try:
+                    added = self.service.meeting_repo.save_invited_batch(
+                        meeting_id, parsed
+                    )
+                    added_msg = (
+                        f"✅ **Данные сохранены.**\n\n"
+                        f"Добавлено приглашённых: **{added}** чел.\n\n"
+                    )
+                except Exception as e:
+                    logger.exception("Ошибка сохранения приглашённых: %s", e)
+                    added_msg = "❌ Ошибка при сохранении в базу данных.\n\n"
+            elif "добавить" in text_lower:
+                msg = self.add_invited_flow.start(event, meeting_id)
+                event.reply_text(msg)
+                return
+
         invited = self.service.get_invited_list()
         dt_display = self.service.get_meeting_datetime_display()
-        header = f"👥 **Приглашённые** ({dt_display})" if dt_display else "👥 **Приглашённые**"
+        header = f"👥 **Приглашённые** ({dt_display})\n" if dt_display else "👥 **Приглашённые**\n"
         lines = [header]
-        for inv in invited:
-            fio = (inv.get("full_name") or "").strip() or "—"
-            contact = inv.get("phone") or inv.get("email") or ""
-            answer = inv.get("answer") or ""
-            if self._answer_is_yes(answer):
-                icon = "✅ "
-            elif self._answer_is_no(answer):
-                icon = "❌ "
-            else:
-                icon = ""
-            lines.append(f"• {icon}{fio}" + (f" — {contact}" if contact else ""))
-        event.reply_text("\n".join(lines))
+        if not invited:
+            #lines.append("")
+            lines.append("Список пуст.")
+        else:
+            sorted_invited = sorted(
+                invited,
+                key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
+            )
+            for i, inv in enumerate(sorted_invited):
+                num = f"{i + 1}."
+                fio = (inv.get("full_name") or "").strip() or "—"
+                contact = inv.get("email") or inv.get("phone") or ""
+                answer = inv.get("answer") or ""
+                if self._answer_is_yes(answer):
+                    icon = "✅ "
+                elif self._answer_is_no(answer):
+                    icon = "❌ "
+                else:
+                    icon = ""
+                part = f"{num} {icon}{fio}"
+                if contact:
+                    part += f" — {contact}"
+                if answer:
+                    part += f" ({answer})"
+                lines.append(part)
+        full_message = added_msg + "\n".join(lines)
+
+        buttons = self._get_invited_buttons(invited, is_admin)
+        if buttons:
+            try:
+                event.reply_text_message(MessageRequest(text=full_message, buttons=buttons))
+            except Exception as e:
+                logger.error("Ошибка отправки сообщения с кнопками: %s", e)
+                event.reply_text(full_message)
+        else:
+            event.reply_text(full_message)
     
     def _handle_attendance_answer(
         self,

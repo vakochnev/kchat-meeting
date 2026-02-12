@@ -2,15 +2,42 @@
 Репозиторий для работы с собраниями (Meeting) и приглашёнными (Invited).
 """
 import logging
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 
 from db.models import Invited, Meeting, MeetingAdmin
 from db.session import get_session_context
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_phone(value: Optional[str]) -> Optional[str]:
+    """
+    Нормализует номер телефона к формату 79991234567.
+    Убирает все нецифровые символы, 8 в начале заменяет на 7.
+    """
+    if not value or not value.strip():
+        return None
+    digits = re.sub(r"\D", "", value)
+    if not digits:
+        return None
+    if len(digits) == 10 and digits[0] == "9":
+        return "7" + digits
+    if len(digits) == 11 and digits[0] == "8":
+        return "7" + digits[1:]
+    if len(digits) == 11 and digits[0] == "7":
+        return digits
+    if len(digits) >= 11:
+        # Берём 11 цифр (7 + 10 цифр номера)
+        if digits[0] == "7":
+            return digits[:11]
+        if digits[0] == "8":
+            return "7" + digits[1:11]
+    return None
 
 
 class MeetingRepository:
@@ -26,6 +53,21 @@ class MeetingRepository:
         """Возвращает совещание по ID."""
         with get_session_context() as session:
             return session.scalar(select(Meeting).where(Meeting.id == meeting_id))
+
+    def get_meeting_info_by_id(self, meeting_id: int) -> Dict[str, Any]:
+        """Возвращает данные собрания по ID в формате словаря."""
+        meeting = self.get_meeting_by_id(meeting_id)
+        if not meeting:
+            return {}
+        return {
+            "meeting_id": meeting.id,
+            "topic": meeting.topic,
+            "url": meeting.url,
+            "date": meeting.date,
+            "time": meeting.time,
+            "place": meeting.place,
+            "link": meeting.link,
+        }
 
     def get_meeting_info(self) -> Dict[str, Any]:
         """
@@ -220,28 +262,108 @@ class MeetingRepository:
             session.flush()
             return meeting.id
 
-    def save_invited(
+    def copy_invited_to_meeting(
         self,
-        meeting_id: int,
-        full_name: Optional[str] = None,
-        email: Optional[str] = None,
-        phone: Optional[str] = None,
-    ) -> Invited:
+        source_meeting_id: int,
+        target_meeting_id: int,
+    ) -> int:
         """
-        Добавляет приглашённого к совещанию.
-
-        Вызывается только при явном добавлении пользователя (например,
-        через команду /приглашенные). При создании собрания не вызывается.
+        Копирует приглашённых из source в target с status=invited, answer=None.
+        Возвращает количество скопированных записей.
         """
         with get_session_context() as session:
-            invited = Invited(
-                meeting_id=meeting_id,
-                full_name=full_name,
-                email=email,
-                phone=phone,
+            stmt = select(Invited).where(Invited.meeting_id == source_meeting_id)
+            source_rows = session.scalars(stmt).all()
+            copied = 0
+            for inv in source_rows:
+                new_inv = Invited(
+                    meeting_id=target_meeting_id,
+                    full_name=inv.full_name,
+                    email=inv.email,
+                    phone=inv.phone,
+                    answer=None,
+                    status="invited",
+                )
+                try:
+                    with session.begin_nested():
+                        session.add(new_inv)
+                        session.flush()
+                    copied += 1
+                except IntegrityError:
+                    pass
+            logger.info(
+                "copy_invited_to_meeting: source=%s target=%s copied=%d",
+                source_meeting_id, target_meeting_id, copied,
             )
-            session.add(invited)
-            return invited
+            return copied
+
+    def save_invited_batch(
+        self,
+        meeting_id: int,
+        rows: list,
+    ) -> int:
+        """
+        Сохраняет приглашённых в таблицу invited в одной транзакции.
+        Дубликаты исключаются на уровне БД (UNIQUE constraint).
+        rows: список dict с ключами full_name, email, phone.
+        """
+        if not rows:
+            logger.debug("save_invited_batch: rows пуст")
+            return 0
+        added = 0
+        with get_session_context() as session:
+            for row in rows:
+                email = (row.get("email") or "").strip() or None
+                full_name = (row.get("full_name") or "").strip() or None
+                raw_phone = (row.get("phone") or "").strip() or None
+                phone = _normalize_phone(raw_phone) if raw_phone else None
+                if not full_name:
+                    continue
+                invited = Invited(
+                    meeting_id=meeting_id,
+                    full_name=full_name,
+                    email=email,
+                    phone=phone,
+                )
+                try:
+                    with session.begin_nested():
+                        session.add(invited)
+                        session.flush()
+                    added += 1
+                except IntegrityError:
+                    pass
+            logger.info(
+                "save_invited_batch: meeting_id=%s, добавлено %d записей",
+                meeting_id, added,
+            )
+        return added
+
+    def delete_invited_by_email(
+        self,
+        meeting_id: int,
+        email: str,
+    ) -> bool:
+        """
+        Удаляет приглашённого по meeting_id и email.
+        Возвращает True если запись найдена и удалена, False иначе.
+        """
+        if not email or not email.strip():
+            return False
+        email_norm = email.strip().lower()
+        with get_session_context() as session:
+            stmt = select(Invited).where(
+                Invited.meeting_id == meeting_id,
+                func.lower(Invited.email) == email_norm,
+            )
+            invited = session.scalar(stmt)
+            if not invited:
+                return False
+            session.delete(invited)
+            logger.info(
+                "delete_invited_by_email: meeting_id=%s email=%s",
+                meeting_id, email_norm,
+            )
+            return True
 
     @staticmethod
     def _parse_datetime(date_str: str, time_str: str) -> Optional[datetime]:

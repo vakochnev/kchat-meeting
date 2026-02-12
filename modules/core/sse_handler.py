@@ -52,6 +52,11 @@ class SSEHandler:
                         
                         try:
                             data = json.loads(line[5:].strip())
+                            logger.debug(
+                                "SSE raw: keys=%s type=%s",
+                                list(data.keys()) if isinstance(data, dict) else type(data),
+                                data.get("type") if isinstance(data, dict) else "—",
+                            )
                             on_message(data)
                         except json.JSONDecodeError:
                             continue

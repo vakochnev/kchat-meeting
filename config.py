@@ -63,8 +63,6 @@ class Config:
         """Проверяет обязательные настройки."""
         if not self.bot_token:
             raise ValueError("BOT_TOKEN не указан")
-        if not self.meeting_dir.exists():
-            self.meeting_dir.mkdir(parents=True, exist_ok=True)
 
 
 # Глобальный экземпляр конфигурации

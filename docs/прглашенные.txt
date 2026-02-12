@@ -1,0 +1,13 @@
+Кочнев Вадим Александрович | v.a.kochnev@testkalashnikovconcern.ru | +7(912)4560100
+Учанова Марина Александровна | m.a.uchanova@kalashnikovconcern.ru | +7(912)460-05-54
+Попов Станислав Сергеевич | st.s.popov@kalashnikovconcern.ru | +7 927 507-12-00
+Жандармов Кирилл Андреевич | k.a.zhandarmov@kalashnikovconcern.ru | 79153559054
+
+ФИО1 | email1@example.com | +7(999)1234568
+ФИО | email@example.com | 79991234567
+ФИО2 | email2@example.com | +7 999 123-45-69
+ФИО3 | email3@example.com | +7 999 123-45-70
+
+
+uv run alembic revision --autogenerate -m "initial"
+uv run alembic upgrade head

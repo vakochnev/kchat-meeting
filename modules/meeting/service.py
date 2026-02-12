@@ -150,11 +150,6 @@ class MeetingService:
         invited_list = self.meeting_repo.get_invited_list()
         meeting_info = self.meeting_repo.get_meeting_info()
         if not invited_list or not meeting_info:
-            logger.debug(
-                "allowed_check: нет данных — invited_list=%s, meeting_info=%s",
-                "пусто" if not invited_list else len(invited_list),
-                "пусто" if not meeting_info else "есть",
-            )
             return None
 
         meeting_id = meeting_info.get("meeting_id")
@@ -164,7 +159,6 @@ class MeetingService:
 
         now = datetime.utcnow() if meeting_dt.tzinfo is None else datetime.now(meeting_dt.tzinfo)
         if meeting_dt < now:
-            logger.debug("allowed_check: совещание в прошлом, доступ запрещён")
             return None
 
         def get_str(d: dict, *keys: str) -> Optional[str]:
@@ -184,7 +178,6 @@ class MeetingService:
                 continue
             inv_email = self._normalize_email(get_str(inv, "email"))
             if inv_email and user_email == inv_email:
-                logger.debug("allowed_check: совпадение по email [%s]", user_email)
                 return meeting_id
 
         logger.debug(
@@ -309,12 +302,6 @@ class MeetingService:
             "есть" if api_data else "нет",
             has_ident,
         )
-        if user_data:
-            logger.debug(
-                "allowed_check: full_name=%s email=%s",
-                _build_full_name(user_data),
-                user_data.get("email") or "нет",
-            )
         if not has_ident:
             return None
         return user_data
@@ -359,12 +346,6 @@ class MeetingService:
             )
             return False
 
-        logger.debug(
-            "allowed_check: sender_id=%s email=%s",
-            event.sender_id,
-            user_data.get("email") or "нет",
-        )
-        
         in_invited = self._meeting_id_if_invited(user_data) is not None
         email = (user_data.get("email") or "").strip().lower()
         is_admin = bool(email and self.meeting_repo.is_admin(email))
@@ -405,8 +386,8 @@ class MeetingService:
             workspace_id = getattr(event, "workspace_id", None)
             if group_id is not None and workspace_id is not None:
                 user = self.user_repo.get_by_chat(sender_id, group_id, workspace_id)
-                if user and (user.full_name or "").strip():
-                    return (user.full_name or "").strip()
+                if user and (user.get("full_name") or "").strip():
+                    return (user.get("full_name") or "").strip()
 
         if event is not None:
             payload_fio, payload_data = self._fio_from_message_payload(event)
@@ -614,16 +595,16 @@ class MeetingService:
             logger.error("Нужны group_id и workspace_id для сохранения ответа")
             return False
         user = self.user_repo.get_by_chat(sender_id, group_id, workspace_id)
-        if not user or not user.email:
+        if not user or not user.get("email"):
             logger.error("Пользователь не найден или нет email: sender_id=%s", sender_id)
             return False
         if not self.storage.update_invited_answer(
-            email=user.email,
+            email=user["email"],
             meeting_id=meeting_id,
             answer=answer,
             status="answered",
-            full_name=user.full_name,
-            phone=user.phone,
+            full_name=user.get("full_name"),
+            phone=user.get("phone"),
         ):
             logger.error(
                 "Не удалось сохранить ответ: sender_id=%s, meeting_id=%s",
@@ -640,6 +621,12 @@ class MeetingService:
             event_data: Данные события из SSE.
         """
         try:
+            logger.debug(
+                "process_sse_event: type=%s keys=%s (content=%s)",
+                event_data.get("type"),
+                list(event_data.keys()),
+                "str" if isinstance(event_data.get("content"), str) else type(event_data.get("content")),
+            )
             event_type = event_data.get("type")
             
             # Обрабатываем только события MESSAGE
@@ -716,16 +703,17 @@ class MeetingService:
 
             # Данные пользователя в БД не сохраняем при входе в чат (SSE).
             # Сохранение выполняется только при голосовании (sync_user_from_event в handler).
-            logger.info(
-                "SSE MESSAGE: sender_id=%s full_name=%s email=%s (данные в БД сохраняются при голосовании)",
+            logger.debug(
+                "SSE MESSAGE: sender_id=%s full_name=%s email=%s",
                 sender_id,
                 full_name,
                 email or "нет",
             )
-            logger.info(
-                "SSE MESSAGE: структура события — type=%s keys=%s",
-                event_type,
+            logger.debug(
+                "SSE MESSAGE: raw event keys=%s payload_keys=%s messages[0]=%s",
                 list(event_data.keys()),
+                list(event_data.get("payload", {}).keys()) if isinstance(event_data.get("payload"), dict) else "—",
+                (event_data.get("payload", {}).get("messages") or [{}])[0] if event_data.get("payload") else "—",
             )
         
         except Exception as e:

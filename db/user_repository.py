@@ -64,15 +64,24 @@ class UserRepository:
         sender_id: int,
         group_id: int,
         workspace_id: int,
-    ) -> Optional[User]:
+    ) -> Optional[dict]:
         """
-        Возвращает пользователя по контексту чата.
+        Возвращает данные пользователя по контексту чата.
+        Возвращает dict с full_name, email, phone (не ORM-объект) — чтобы избежать
+        DetachedInstanceError при доступе вне сессии.
         """
         with get_session_context() as session:
-            return session.scalar(
+            user = session.scalar(
                 select(User).where(
                     User.sender_id == sender_id,
                     User.group_id == group_id,
                     User.workspace_id == workspace_id,
                 )
             )
+            if user is None:
+                return None
+            return {
+                "full_name": user.full_name,
+                "email": user.email,
+                "phone": user.phone,
+            }

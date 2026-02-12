@@ -5,11 +5,12 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     DateTime,
     ForeignKey,
     Integer,
     String,
-    BigInteger,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -26,9 +27,16 @@ class BaseModel(Base):
     __abstract__ = True
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=func.now(),
+        server_default=func.now(),
+    )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True),
+        default=func.now(),
+        onupdate=func.now(),
+        server_default=func.now(),
     )
 
 
@@ -44,12 +52,6 @@ class User(BaseModel):
     workspace_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-    )
-
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, sender_id={self.sender_id}, email={self.email})>"
@@ -94,9 +96,11 @@ class Invited(BaseModel):
     Приглашённый на совещание.
     Объединяет список приглашённых и ответы о присутствии (answer, status).
     Связь: meeting.
+    Дубликаты по (meeting_id, email) запрещены.
     """
 
     __tablename__ = "invited"
+    __table_args__ = (UniqueConstraint("meeting_id", "email", name="uq_invited_meeting_email"),)
 
     meeting_id: Mapped[int] = mapped_column(
         Integer, ForeignKey("meetings.id", ondelete="CASCADE"), nullable=False, index=True

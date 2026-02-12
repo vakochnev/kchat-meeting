@@ -12,19 +12,6 @@ from config import config
 logger = logging.getLogger(__name__)
 
 
-# def _normalize_job_title(value: Any) -> Optional[str]:
-#     """
-#     Возвращает строку должности или None.
-#     Числовые значения (ID должности, напр. 113) не считаются названием — отбрасываются.
-#     """
-#     if value is None:
-#         return None
-#     s = str(value).strip()
-#     if not s or s.isdigit():
-#         return None
-#     return s
-
-
 def get_user_info(user_id: int) -> Dict[str, Any]:
     """
     Получает информацию о пользователе по ID через API K-CHAT.
