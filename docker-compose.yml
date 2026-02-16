@@ -1,0 +1,26 @@
+services:
+  kchat-meeting:
+    build: .
+    image: kchat-meeting:latest
+    container_name: kchat-meeting
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+      - BOT_TOKEN=${BOT_TOKEN}
+      - API_BASE_URL=${API_BASE_URL:-https://api.kchat.app}
+      - SSE_BASE_URL=${SSE_BASE_URL:-https://pusher.kchat.app}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      # LOG_FILE — при необходимости логи в файл (volume /app/logs)
+      - LOG_FILE=${LOG_FILE:-}
+    volumes:
+      - kchat-meeting-logs:/app/logs
+    # Внешняя БД — DATABASE_URL указывает на хост вне Docker.
+    # Для БД на том же хосте (Linux) добавьте:
+    #   extra_hosts:
+    #     - "host.docker.internal:host-gateway"
+    #   DATABASE_URL=postgresql://user:pass@host.docker.internal:5432/meeting
+
+volumes:
+  kchat-meeting-logs:
