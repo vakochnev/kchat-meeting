@@ -19,6 +19,7 @@ COPY db/ db/
 COPY modules/ modules/
 COPY api/ api/
 COPY scripts/ scripts/
+COPY tools/ tools/
 COPY main.py config.py .
 
 # Директория для логов (при LOG_FILE)

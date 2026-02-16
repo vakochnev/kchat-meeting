@@ -17,8 +17,18 @@ services:
       # meeting_admins — список при инициализации (email или full_name|email, ;)
       - MEETING_ADMINS=${MEETING_ADMINS:-}
       - MEETING_ADMINS_FILE=${MEETING_ADMINS_FILE:-}
+      # Health check (вся конфигурация из .env)
+      - HEALTH_CHECK_GROUP_ID=${HEALTH_CHECK_GROUP_ID:-}
+      - HEALTH_CHECK_WORKSPACE_ID=${HEALTH_CHECK_WORKSPACE_ID:-}
+      - HEALTH_CHECK_TIMEOUT=${HEALTH_CHECK_TIMEOUT:-10}
     volumes:
       - kchat-meeting-logs:/app/logs
+    healthcheck:
+      test: ["CMD", "python", "tools/bot_health_check.py", "-q"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     # Внешняя БД — DATABASE_URL указывает на хост вне Docker.
     # Для БД на том же хосте (Linux) добавьте:
     #   extra_hosts:

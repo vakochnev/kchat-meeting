@@ -14,6 +14,7 @@ from messenger_bot_api import (
 
 from config import config
 from .sse_handler import SSEHandler
+from .health_check_responder import HealthCheckResponder
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class BotApp:
         self._sse_handler: Optional[Callable[[Dict[str, Any]], None]] = None
         self._sse_thread: Optional[threading.Thread] = None
         self._sse_client: Optional[SSEHandler] = None
+        self._health_check_responder: Optional[HealthCheckResponder] = None
         self._running: bool = False
     
     def setup(
@@ -61,11 +63,19 @@ class BotApp:
         )
         
         logger.info("Бот совещаний настроен")
-        
+
+        # Health check responder — получает события из общего SSE
+        self._health_check_responder = HealthCheckResponder(
+            token=config.bot_token,
+            api_base_url=config.api_base_url,
+            sse_base_url=config.sse_base_url,
+        )
+        self._health_check_responder.start()
+
         # Запускаем SSE обработчик в отдельном потоке
         if sse_handler:
             self._start_sse_handler()
-    
+
     def _start_sse_handler(self) -> None:
         """Запускает SSE обработчик в отдельном потоке."""
         if not self._sse_handler:
@@ -156,7 +166,11 @@ class BotApp:
     def stop(self) -> None:
         """Останавливает бота."""
         self._running = False
-        
+
+        if self._health_check_responder:
+            logger.info("Остановка health check responder...")
+            self._health_check_responder.stop()
+
         if self._sse_client:
             logger.info("Остановка SSE обработчика...")
             self._sse_client.disconnect()

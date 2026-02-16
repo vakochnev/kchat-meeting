@@ -136,6 +136,33 @@ LOG_FILE=/app/logs/bot.log
 | `LOG_FILE` | Нет | Путь к файлу логов |
 | `MEETING_ADMINS` | Нет | Список email админов при инициализации |
 | `MEETING_ADMINS_FILE` | Нет | Путь к файлу со списком админов |
+| `HEALTH_CHECK_GROUP_ID` | Да* | ID группы для health check |
+| `HEALTH_CHECK_WORKSPACE_ID` | Нет | ID workspace (по умолчанию -1) |
+| `HEALTH_CHECK_TIMEOUT` | Нет | Таймаут ожидания эхо в секундах (по умолчанию 10) |
+
+*Для health check нужен HEALTH_CHECK_GROUP_ID.
+
+## Проверка жизни бота (Health Check)
+
+Скрипт `tools/bot_health_check.py` отправляет сообщение в чат и ожидает эхо. Вся конфигурация берётся из `.env`:
+
+```ini
+BOT_TOKEN=...
+API_BASE_URL=https://api.kchat.app
+SSE_BASE_URL=https://pusher.kchat.app
+HEALTH_CHECK_GROUP_ID=123
+HEALTH_CHECK_TIMEOUT=10
+```
+
+**Примеры:**
+
+```bash
+uv run python tools/bot_health_check.py
+uv run python tools/bot_health_check.py -v    # подробный вывод
+uv run python tools/bot_health_check.py -q    # тихий режим для cron/Docker
+```
+
+**Коды возврата:** 0 — OK, 1 — бот не отвечает, 2 — ошибка конфигурации.
 
 ## Структура проекта
 
@@ -152,7 +179,8 @@ kchat-meeting/
 ├── modules/
 │   ├── core/               # Ядро бота
 │   │   ├── app.py         # Основное приложение
-│   │   └── sse_handler.py  # Обработчик SSE
+│   │   ├── sse_handler.py  # Обработчик SSE
+│   │   └── health_check_responder.py  # Эхо для tools/bot_health_check.py
 │   ├── meeting/            # Логика совещаний
 │   │   ├── handler.py     # Главный обработчик
 │   │   ├── service.py     # Бизнес-логика
@@ -161,6 +189,8 @@ kchat-meeting/
 │   └── answers/            # Обработчики типов ответов
 ├── scripts/
 │   └── seed_meeting_admins.py  # Инициализация meeting_admins
+├── tools/
+│   └── bot_health_check.py  # Проверка жизни бота
 ├── alembic/                # Миграции БД
 ├── config.py               # Конфигурация
 ├── main.py                 # Точка входа
