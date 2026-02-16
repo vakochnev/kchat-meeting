@@ -14,17 +14,6 @@ from messenger_bot_api.util import Request, MessageRequest
 
 logger = logging.getLogger(__name__)
 
-# Загрузка шаблона письма из внешнего файла
-EMAIL_TEMPLATE = None
-
-try:
-    with open(config.email_template_path, 'r', encoding='utf-8') as f:
-        EMAIL_TEMPLATE = f.read()
-    logger.info(f"✓ Шаблон письма загружен: {config.email_template_path}")
-except Exception as e:
-    logger.error(f"✗ Не удалось загрузить шаблон {config.email_template_path}: {e}")
-    raise  # Критическая ошибка — без шаблона рассылка невозможна
-
 
 class NotificationDispatcher:
     """Диспетчер уведомлений с поддержкой трёх независимых каналов."""
@@ -51,6 +40,17 @@ class NotificationDispatcher:
         ] if not val]
         if missing:
             logger.warning(f"⚠️ Неполная SMTP-конфигурация: {', '.join(missing)}")
+
+        self.email_template = None
+
+        # Загрузка шаблона письма из внешнего файла
+        try:
+            with open(config.email_template_path, 'r', encoding='utf-8') as f:
+                self.email_template = f.read()
+            logger.info(f"✓ Шаблон письма загружен: {config.email_template_path}")
+        except Exception as e:
+            logger.error(f"✗ Не удалось загрузить шаблон {config.email_template_path}: {e}")
+            raise  # Критическая ошибка — без шаблона рассылка невозможна
 
     def dispatch_for_meeting(self, meeting_id: int, use_multiprocessing: bool = True) -> bool:
         try:
@@ -110,19 +110,19 @@ class NotificationDispatcher:
         phones = set(session.scalars(select(User.phone).where(User.phone.isnot(None))).all())
         return emails, phones
 
-    def _get_pending_invited(self, session, meeting_id: int, reg_emails: set[str], reg_phones: set[str]) -> list[
-        Invited]:
+    def _get_pending_invited(self, session, meeting_id: int, reg_emails: set[str], reg_phones: set[str]) -> list[Invited]:
         stmt = select(Invited).where(Invited.meeting_id == meeting_id)
         pending = []
         for inv in session.scalars(stmt).all():
             is_registered = (inv.email and inv.email in reg_emails) or (inv.phone and inv.phone in reg_phones)
 
             if is_registered:
-                if inv.kchat_status is None:
+                # Обрабатываем: NULL, пустая строка ИЛИ ошибка
+                if inv.kchat_status in (None, '', self.STATUS_ERROR):
                     pending.append(inv)
             else:
-                needs_email = inv.email is not None and inv.email_status is None
-                needs_sms = inv.phone is not None and inv.sms_status is None
+                needs_email = inv.email_status in (None, '', self.STATUS_ERROR)
+                needs_sms = (inv.phone is not None) and (inv.sms_status in (None, '', self.STATUS_ERROR))
                 if needs_email or needs_sms:
                     pending.append(inv)
         return pending
@@ -144,35 +144,31 @@ class NotificationDispatcher:
             )
 
             if is_registered:
-                user = self._find_registered_user(session, invited.email, invited.phone)
+                user = self._find_registered_user(session, invited.email)
                 if user:
                     success = self._send_kchat(user, meeting)
                     self._update_kchat_status(session, invited.id, self.STATUS_SENT if success else self.STATUS_ERROR)
                     stats["kchat_sent" if success else "kchat_error"] += 1
                 else:
-                    logger.warning(f"⚠️ Приглашённый {invited.id} помечен как зарегистрированный, но не найден в User")
+                    logger.warning(f"⚠️ Приглашённый {invited.email} помечен как зарегистрированный, но не найден в User")
                     self._update_kchat_status(session, invited.id, self.STATUS_ERROR)
                     stats["kchat_error"] += 1
             else:
-                if invited.email and invited.email_status is None:
+                if invited.email and invited.email_status in (None, '', self.STATUS_ERROR):
                     success = self._send_email(invited, meeting)
                     self._update_email_status(session, invited.id, self.STATUS_SENT if success else self.STATUS_ERROR)
                     stats["email_sent" if success else "email_error"] += 1
                     time.sleep(0.5)
 
-                if invited.phone and invited.sms_status is None:
+                if invited.phone and invited.sms_status in (None, '', self.STATUS_ERROR):
                     success = self._send_sms_stub(invited, meeting)
                     self._update_sms_status(session, invited.id, self.STATUS_SENT if success else self.STATUS_ERROR)
                     stats["sms_sent" if success else "sms_error"] += 1
 
         return stats
 
-    def _find_registered_user(self, session, email: str | None, phone: str | None) -> User | None:
-        if not email and not phone:
-            return None
+    def _find_registered_user(self, session, email: str) -> User | None:
         conditions = [User.email == email] if email else []
-        if phone:
-            conditions.append(User.phone == phone)
         return session.scalar(select(User).where(*conditions))
 
     def _update_kchat_status(self, session, invited_id: int, status: str) -> bool:
@@ -206,9 +202,8 @@ class NotificationDispatcher:
                 f"📍 Место: {meeting.place or 'уточнить у организатора'}\n"
                 f"🔗 Ссылка: {meeting.link or 'не предоставлена'}\n\n"
                 f"💬 Чтобы подтвердить участие:\n"
-                f"1️⃣ Напишите боту @OperGD в К-ЧАТ\n"
-                f"2️⃣ Введите команду /start\n\n"
-                f"✅ После этого бот предложит выбрать:\n"
+                f"1️ Введите команду /start\n"
+                f"2️ После этого бот предложит выбрать:\n"
                 f"   • Да, буду присутствовать\n"
                 f"   • Нет, не смогу присутствовать"
             )
@@ -245,21 +240,36 @@ class NotificationDispatcher:
             return False
 
     def _create_email_message(self, invited: Invited, meeting: Meeting) -> MIMEMultipart:
-        """Формирование письма на основе внешнего шаблона."""
+        """Формирование письма с динамическим отображением места и ссылки."""
         msg = MIMEMultipart("alternative")
         msg["From"] = self.smtp_sender
         msg["To"] = invited.email
         msg["Subject"] = "📩 Приглашение на оперативное совещание"
 
+        # Дата и время (оставляем как есть)
         datetime_display = f"{meeting.date} в {meeting.time}" if meeting.date and meeting.time else "не указана"
-        link_html = f'<p><strong>🔗 Ссылка:</strong> <a href="{meeting.link}">{meeting.link}</a></p>' if meeting.link else ''
 
-        html_content = EMAIL_TEMPLATE.format(
+        # Блок места: только если указано
+        place_block = (
+            f'<p style="margin: 8px 0;"><strong>📍 Место:</strong> {meeting.place}</p>'
+            if meeting.place and meeting.place.strip()
+            else ''
+        )
+
+        # Блок ссылки: только если указана (с оформлением ссылки)
+        link_block = (
+            f'<p style="margin: 8px 0;"><strong>🔗 Ссылка:</strong> '
+            f'<a href="{meeting.link}" style="color: #0066cc; text-decoration: underline;">{meeting.link}</a></p>'
+            if meeting.link and meeting.link.strip()
+            else ''
+        )
+
+        html_content = self.email_template.format(
             full_name=invited.full_name or "Коллега",
             topic=meeting.topic or "Не указана",
             datetime_display=datetime_display,
-            place=meeting.place or "Не указано",
-            link_html=link_html
+            place_block=place_block,  # Передаём готовый блок или пустую строку
+            link_block=link_block  # Передаём готовый блок или пустую строку
         )
 
         msg.attach(MIMEText(html_content, "html", "utf-8"))

@@ -30,4 +30,4 @@ RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
 # Миграции, seed meeting_admins, затем основной процесс
-CMD alembic upgrade head && python scripts/seed_meeting_admins.py && exec python main.py
+CMD alembic upgrade head && python tools/seed_meeting_admins.py && exec python main.py
