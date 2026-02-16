@@ -55,6 +55,22 @@ class Config:
     # Логирование
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
     log_file: Optional[str] = field(default_factory=lambda: os.getenv("LOG_FILE"))
+
+    smtp_host: str = field(
+        default_factory=lambda: os.getenv("SMTP_HOST", "")
+    )
+    smtp_port: str = field(
+        default_factory=lambda: os.getenv("SMTP_PORT", "")
+    )
+    smtp_user: str = field(
+        default_factory=lambda: os.getenv("SMTP_USER", "")
+    )
+    smtp_password: str = field(
+        default_factory=lambda: os.getenv("SMTP_PASSWORD", "")
+    )
+    smtp_sender: str = field(
+        default_factory=lambda: os.getenv("SMTP_SENDER", "")
+    )
     
     # Настройки совещаний
     # (оставлено для совместимости, если понадобится)

@@ -7,6 +7,8 @@
 """
 import logging
 import sys
+from multiprocessing import set_start_method
+
 
 from config import config
 from db import init_db
@@ -51,7 +53,7 @@ def main() -> int:
     except Exception as e:
         logger.error("Ошибка инициализации БД: %s", e)
         return 1
-
+    
     # Создаём обработчик совещаний
     meeting_handler = MeetingHandler()
     
@@ -69,10 +71,14 @@ def main() -> int:
     except Exception as e:
         logger.error("Критическая ошибка: %s", e, exc_info=True)
         return 1
-    
+
     logger.info("Бот остановлен")
     return 0
 
 
 if __name__ == "__main__":
+    # Устанавливаем метод запуска процессов для Windows
+    if sys.platform == "win32":
+        set_start_method("spawn", force=True)
+
     sys.exit(main())
