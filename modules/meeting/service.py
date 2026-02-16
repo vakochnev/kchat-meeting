@@ -584,8 +584,7 @@ class MeetingService:
         workspace_id: Optional[int] = None,
     ) -> bool:
         """
-        Сохраняет ответ в Invited (по email и meeting_id)
-        и при включённой настройке отправляет на бэкенд.
+        Сохраняет ответ в Invited (по email и meeting_id).
         """
         meeting_id = self._get_meeting_id()
         if not meeting_id:

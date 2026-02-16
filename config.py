@@ -71,14 +71,13 @@ class Config:
     smtp_sender: str = field(
         default_factory=lambda: os.getenv("SMTP_SENDER", "")
     )
+
+    email_template_path: str = field(
+        default_factory=lambda: os.getenv("EMAIL_TEMPLATE_PATH", "")
+    )
     
     # Настройки совещаний
-    meeting_admins: str = field(
-        default_factory=lambda: os.getenv("MEETING_ADMINS", "")
-    )
-    meeting_admins_file: str = field(
-        default_factory=lambda: os.getenv("MEETING_ADMINS_FILE", "")
-    )
+    # (оставлено для совместимости, если понадобится)
     
     def validate(self) -> None:
         """Проверяет обязательные настройки."""

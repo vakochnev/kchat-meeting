@@ -109,9 +109,10 @@ class Invited(BaseModel):
     phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     answer: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    status: Mapped[Optional[str]] = mapped_column(
-        String(50), nullable=True, server_default="invited"
-    )
+
+    kchat_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    email_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    sms_status: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     meeting = relationship("Meeting", back_populates="invited")
 

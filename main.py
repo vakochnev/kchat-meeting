@@ -59,6 +59,7 @@ def main() -> int:
     
     # Создаём и настраиваем приложение
     app = BotApp()
+
     app.setup(
         message_handler=meeting_handler.handle_message,
         callback_handler=meeting_handler.handle_callback,
