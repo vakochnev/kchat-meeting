@@ -73,7 +73,12 @@ class Config:
     )
     
     # Настройки совещаний
-    # (оставлено для совместимости, если понадобится)
+    meeting_admins: str = field(
+        default_factory=lambda: os.getenv("MEETING_ADMINS", "")
+    )
+    meeting_admins_file: str = field(
+        default_factory=lambda: os.getenv("MEETING_ADMINS_FILE", "")
+    )
     
     def validate(self) -> None:
         """Проверяет обязательные настройки."""

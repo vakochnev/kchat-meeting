@@ -14,6 +14,9 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       # LOG_FILE — при необходимости логи в файл (volume /app/logs)
       - LOG_FILE=${LOG_FILE:-}
+      # meeting_admins — список при инициализации (email или full_name|email, ;)
+      - MEETING_ADMINS=${MEETING_ADMINS:-}
+      - MEETING_ADMINS_FILE=${MEETING_ADMINS_FILE:-}
     volumes:
       - kchat-meeting-logs:/app/logs
     # Внешняя БД — DATABASE_URL указывает на хост вне Docker.

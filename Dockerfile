@@ -18,6 +18,7 @@ COPY alembic.ini .
 COPY db/ db/
 COPY modules/ modules/
 COPY api/ api/
+COPY scripts/ scripts/
 COPY main.py config.py .
 
 # Директория для логов (при LOG_FILE)
@@ -27,5 +28,5 @@ RUN mkdir -p /app/logs
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
 
-# Миграции при старте, затем основной процесс
-CMD alembic upgrade head && exec python main.py
+# Миграции, seed meeting_admins, затем основной процесс
+CMD alembic upgrade head && python scripts/seed_meeting_admins.py && exec python main.py
