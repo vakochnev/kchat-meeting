@@ -27,16 +27,25 @@ class UserRepository:
         """
         Сохраняет или обновляет пользователя, начавшего чат с ботом.
         Уникальность по (sender_id, group_id, workspace_id).
+        Нормализует id к int для корректного сравнения (избегает дубликатов при str/int из API).
         Возвращает User или None при ошибке.
         """
+        try:
+            sid = int(sender_id)
+            gid = int(group_id)
+            wid = int(workspace_id)
+        except (TypeError, ValueError):
+            logger.warning("save_user_on_chat: невалидные id: sender=%s group=%s workspace=%s", sender_id, group_id, workspace_id)
+            return None
+
         if not full_name or not full_name.strip():
             full_name = "—"
         with get_session_context() as session:
             existing = session.scalar(
                 select(User).where(
-                    User.sender_id == sender_id,
-                    User.group_id == group_id,
-                    User.workspace_id == workspace_id,
+                    User.sender_id == sid,
+                    User.group_id == gid,
+                    User.workspace_id == wid,
                 )
             )
             if existing:
@@ -48,9 +57,9 @@ class UserRepository:
                 session.flush()
                 return existing
             user = User(
-                sender_id=sender_id,
-                group_id=group_id,
-                workspace_id=workspace_id,
+                sender_id=sid,
+                group_id=gid,
+                workspace_id=wid,
                 full_name=full_name.strip(),
                 email=email.strip() if email else None,
                 phone=phone.strip() if phone else None,

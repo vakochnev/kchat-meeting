@@ -41,9 +41,15 @@ class BaseModel(Base):
 
 
 class User(BaseModel):
-    """Пользователь, начавший чат с ботом."""
+    """Пользователь, начавший чат с ботом. Один на (sender_id, group_id, workspace_id)."""
 
     __tablename__ = "users"
+    __table_args__ = (
+        UniqueConstraint(
+            "sender_id", "group_id", "workspace_id",
+            name="uq_users_sender_group_workspace",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)

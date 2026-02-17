@@ -90,10 +90,16 @@ class MeetingService:
 
         Вызывать при любой команде/обращении пользователя.
         """
-        sender_id = event.sender_id
-        group_id = getattr(event, "group_id", None)
-        workspace_id = getattr(event, "workspace_id", None)
-        if not sender_id or not group_id or not workspace_id:
+        raw_sender = event.sender_id
+        raw_group = getattr(event, "group_id", None)
+        raw_workspace = getattr(event, "workspace_id", None)
+        if raw_sender is None or raw_group is None or raw_workspace is None:
+            return
+        try:
+            sender_id = int(raw_sender)
+            group_id = int(raw_group)
+            workspace_id = int(raw_workspace)
+        except (TypeError, ValueError):
             return
 
         payload_data = self._user_data_from_message_payload(event)
@@ -310,11 +316,18 @@ class MeetingService:
         """
         Сохраняет пользователя, начавшего чат с ботом, в таблицу users.
         Вызывать при каждом message/callback (если есть sender_id, group_id, workspace_id).
+        Уникальность по (sender_id, group_id, workspace_id) — при повторных вызовах обновляется.
         """
-        sender_id = event.sender_id
-        group_id = getattr(event, "group_id", None)
-        workspace_id = getattr(event, "workspace_id", None)
-        if not sender_id or group_id is None or workspace_id is None:
+        raw_sender = event.sender_id
+        raw_group = getattr(event, "group_id", None)
+        raw_workspace = getattr(event, "workspace_id", None)
+        if raw_sender is None or raw_group is None or raw_workspace is None:
+            return
+        try:
+            sender_id = int(raw_sender)
+            group_id = int(raw_group)
+            workspace_id = int(raw_workspace)
+        except (TypeError, ValueError):
             return
         user_data = self._get_user_data_from_event(event)
         full_name = _build_full_name(user_data)
