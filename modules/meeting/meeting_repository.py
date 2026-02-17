@@ -132,6 +132,50 @@ class MeetingRepository:
                 for r in rows
             ]
 
+    def search_invited(
+        self, meeting_id: int, query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Ищет приглашённых по вхождению query в ФИО или email.
+        Поиск регистронезависимый, работает с NULL значениями.
+        """
+        from sqlalchemy import func, or_
+        
+        query_lower = query.strip().lower()
+        if not query_lower:
+            return []
+        
+        with get_session_context() as session:
+            meeting = session.scalar(
+                select(Meeting).where(Meeting.id == meeting_id)
+            )
+            if not meeting:
+                return []
+            
+            # Получаем всех приглашённых для этого собрания
+            all_invited = session.scalars(
+                select(Invited).where(Invited.meeting_id == meeting.id)
+            ).all()
+            
+            # Фильтруем в Python для надёжности (работает с NULL и пробелами)
+            results = []
+            for inv in all_invited:
+                full_name_lower = (inv.full_name or "").strip().lower()
+                email_lower = (inv.email or "").strip().lower()
+                
+                if query_lower in full_name_lower or query_lower in email_lower:
+                    results.append(inv)
+            
+            return [
+                {
+                    "full_name": r.full_name or "",
+                    "email": r.email or "",
+                    "phone": r.phone or "",
+                    "answer": r.answer or "",
+                }
+                for r in results
+            ]
+
     def save_admin(
         self,
         email: str,

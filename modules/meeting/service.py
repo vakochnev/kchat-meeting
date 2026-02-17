@@ -378,7 +378,21 @@ class MeetingService:
         return allowed
 
     def get_user_email(self, event: MessageBotEvent) -> Optional[str]:
-        """Возвращает email пользователя из события (payload или API)."""
+        """
+        Возвращает email пользователя. Сначала из таблицы users (быстро),
+        при отсутствии — из события (payload/API).
+        """
+        gid = getattr(event, "group_id", None)
+        wid = getattr(event, "workspace_id", None)
+        if event.sender_id is not None and gid is not None and wid is not None:
+            try:
+                user = self.user_repo.get_by_chat(
+                    int(event.sender_id), int(gid), int(wid)
+                )
+                if user and (user.get("email") or "").strip():
+                    return (user.get("email") or "").strip().lower()
+            except (TypeError, ValueError):
+                pass
         user_data = self._get_user_data_from_event(event)
         if not user_data:
             return None
@@ -481,7 +495,10 @@ class MeetingService:
         buttons = []
         all_buttons = self.config.get_all_buttons()
         
-        for key in ["yes", "no"]:
+        ATTENDANCE_BUTTON_ORDER = [
+            "yes", "no", "no_sick", "no_business_trip", "no_vacation"
+        ]
+        for key in ATTENDANCE_BUTTON_ORDER:
             button_config = all_buttons.get(key)
             if button_config:
                 label = button_config.get("label") or ""

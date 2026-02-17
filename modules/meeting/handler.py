@@ -13,6 +13,7 @@ from .create_meeting_flow import CreateMeetingFlow
 from .edit_meeting_flow import EditMeetingFlow
 from .add_invited_flow import AddInvitedFlow
 from .edit_delete_invited_flow import EditDeleteInvitedFlow
+from .search_invited_flow import SearchInvitedFlow
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,8 @@ COMMANDS = {
     "/участие": "attendance",
     "/приглашенные": "invited",
     "/собрание": "meeting_menu",
+    "собрание": "meeting_menu",  # без слэша (меню K-Chat)
+    "собрание создать": "create_meeting",  # меню «Собрание» → «Создать»
     "/создать_собрание": "create_meeting",
     "/create_meeting": "create_meeting",
     "/отмена": "cancel",
@@ -47,6 +50,7 @@ class MeetingHandler:
         self.edit_meeting_flow = EditMeetingFlow()
         self.add_invited_flow = AddInvitedFlow()
         self.edit_delete_invited_flow = EditDeleteInvitedFlow()
+        self.search_invited_flow = SearchInvitedFlow()
     
     def handle_message(self, event: MessageBotEvent) -> None:
         """Обрабатывает входящее сообщение."""
@@ -113,6 +117,8 @@ class MeetingHandler:
                     self.add_invited_flow.cancel(event)
                 if self.edit_delete_invited_flow.is_active(event):
                     self.edit_delete_invited_flow.cancel(event)
+                if self.search_invited_flow.is_active(event):
+                    self.search_invited_flow.cancel(event)
             self._handle_command(event, command)
             return
 
@@ -154,6 +160,42 @@ class MeetingHandler:
             if done:
                 self._handle_invited(event, skip_parse_and_save=True)
             return
+
+        # Ожидание строки поиска для приглашённых
+        if self.search_invited_flow.is_active(event):
+            meeting_info = self.service.get_meeting_info()
+            meeting_id = meeting_info.get("meeting_id") if meeting_info else None
+            if meeting_id:
+                msg, done = self.search_invited_flow.process(
+                    event,
+                    text,
+                    self.service.meeting_repo.search_invited,
+                )
+                # Если поиск завершён успешно (done=True) и есть результаты, показываем кнопки
+                if done and not msg.startswith("❌"):
+                    email = self.service.get_user_email(event)
+                    is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+                    # Получаем все приглашённые для формирования кнопок
+                    all_invited = self.service.get_invited_list()
+                    has_any_invited = len(all_invited) > 0
+                    buttons = self._get_invited_buttons(
+                        all_invited, is_admin, has_any_invited=has_any_invited
+                    )
+                    if buttons:
+                        try:
+                            event.reply_text_message(MessageRequest(text=msg, buttons=buttons))
+                        except Exception as e:
+                            logger.error("Ошибка отправки результатов поиска с кнопками: %s", e)
+                            event.reply_text(msg)
+                    else:
+                        event.reply_text(msg)
+                else:
+                    event.reply_text(msg)
+                return
+            else:
+                msg = self.search_invited_flow.cancel(event)
+                event.reply_text(msg)
+                return
 
         # Ожидание списка приглашённых (отдельным сообщением)
         add_invited_active = self.add_invited_flow.is_active(event)
@@ -200,6 +242,13 @@ class MeetingHandler:
     
     def handle_callback(self, event: MessageBotEvent) -> None:
         """Обрабатывает callback от кнопки."""
+        # Подтверждение события (API может ожидать — без этого клиент «виснет»)
+        if hasattr(event, "event_id") and getattr(event, "event_id", None) is not None:
+            try:
+                event.confirm_event_from_current_group(event.event_id)
+            except Exception as e:
+                logger.debug("confirm_event: %s", e)
+
         self.service.sync_user_to_users_table(event)
         if not self.service.check_user_allowed(event):
             event.reply_text(self.config.get_message("not_allowed"))
@@ -214,29 +263,54 @@ class MeetingHandler:
         )
         logger.debug("Callback от %s: %s", event.sender_id, callback_data)
         
-        if callback_data == "meeting_yes":
-            self._handle_attendance_answer(event, "yes")
+        # Обработка callback для голосования (meeting_yes, meeting_no, и т.д.)
+        if callback_data and callback_data.startswith("meeting_"):
+            answer_key = callback_data[len("meeting_"):]
+            if answer_key in (
+                "yes", "no", "no_sick", "no_business_trip", "no_vacation"
+            ):
+                self._handle_attendance_answer(event, answer_key)
+                return
         
-        elif callback_data == "meeting_no":
-            self._handle_attendance_answer(event, "no")
-
-        elif callback_data == "meeting_create":
+        # Обработка остальных callback
+        if callback_data == "meeting_create":
+            logger.debug("handle_callback: вызов _handle_create_meeting")
             self._handle_create_meeting(event)
+            return
 
-        elif callback_data == "meeting_edit":
+        if callback_data == "meeting_edit":
             self._handle_edit_meeting(event)
+            return
 
-        elif callback_data == "meeting_move":
+        if callback_data == "meeting_move":
             self._handle_move_meeting(event)
+            return
 
-        elif callback_data == "invited_add":
+        if callback_data == "invited_add":
             self._handle_invited_add(event)
+            return
 
-        elif callback_data == "invited_delete":
+        if callback_data == "invited_delete":
             self._handle_invited_delete(event)
+            return
+
+        if callback_data == "invited_search":
+            self._handle_invited_search(event)
+            return
+
+        if callback_data == "invited_filter_voted":
+            self._handle_invited(event, filter_type="voted")
+            return
+
+        if callback_data == "invited_filter_not_voted":
+            self._handle_invited(event, filter_type="not_voted")
+            return
+
+        if callback_data == "invited_filter_all":
+            self._handle_invited(event, filter_type=None)
+            return
         
-        else:
-            logger.warning("Неизвестный callback: %s", callback_data)
+        logger.warning("Неизвестный callback: %s", callback_data)
     
     def handle_sse_event(self, event_data: Dict[str, Any]) -> None:
         """
@@ -309,6 +383,11 @@ class MeetingHandler:
         """Команда /собрание — меню с кнопками: Создать, Изменить, Перенести."""
         self._show_meeting_menu(event)
 
+    # ID кнопок меню собрания (100+) — не конфликтуют с кнопками голосования (1-5)
+    _MEETING_BTN_CREATE = 100
+    _MEETING_BTN_EDIT = 101
+    _MEETING_BTN_MOVE = 102
+
     def _get_meeting_menu_buttons(self) -> list:
         """
         Формирует кнопки меню собрания.
@@ -318,18 +397,24 @@ class MeetingHandler:
         if has_meeting:
             return [
                 InlineMessageButton(
-                    id=2, label="✏️ Изменить",
-                    callback_message="✏️ Изменить", callback_data="meeting_edit"
+                    id=self._MEETING_BTN_EDIT,
+                    label="✏️ Изменить",
+                    callback_message="✏️ Изменить",
+                    callback_data="meeting_edit",
                 ),
                 InlineMessageButton(
-                    id=3, label="📅 Перенести",
-                    callback_message="📅 Перенести", callback_data="meeting_move"
+                    id=self._MEETING_BTN_MOVE,
+                    label="📅 Перенести",
+                    callback_message="📅 Перенести",
+                    callback_data="meeting_move",
                 ),
             ]
         return [
             InlineMessageButton(
-                id=1, label="✨ Создать",
-                callback_message="✨ Создать", callback_data="meeting_create"
+                id=self._MEETING_BTN_CREATE,
+                label="✨ Создать",
+                callback_message="✨ Создать",
+                callback_data="meeting_create",
             ),
         ]
 
@@ -417,43 +502,53 @@ class MeetingHandler:
         Запускает пошаговый диалог ввода полей (вызов по /создать_собрание или кнопке Создать).
         Если собрание уже есть — сообщение и предложение «Изменить».
         """
-        email = self.service.get_user_email(event)
-        if not email:
-            event.reply_text(
-                "❌ Для создания собрания необходим email в профиле. "
-                "Укажите email в настройках K-Chat."
-            )
-            return
-        if not self.service.meeting_repo.is_admin(email):
-            event.reply_text(
-                self.config.get_message("create_meeting_not_admin")
-                or "❌ Команда доступна только администраторам."
-            )
-            return
-        meeting_info = self.service.meeting_repo.get_meeting_info()
-        if meeting_info:
-            message = (
-                "ℹ️ Собрание уже создано.\n\n"
-                "Для редактирования используйте кнопку «✏️ Изменить» или «📅 Перенести»."
-            )
-            buttons = [
-                InlineMessageButton(
-                    id=2, label="✏️ Изменить",
-                    callback_message="✏️ Изменить", callback_data="meeting_edit"
-                ),
-                InlineMessageButton(
-                    id=3, label="📅 Перенести",
-                    callback_message="📅 Перенести", callback_data="meeting_move"
-                ),
-            ]
+        logger.debug("_handle_create_meeting: начало, sender_id=%s", event.sender_id)
+        try:
+            email = self.service.get_user_email(event)
+            logger.debug("_handle_create_meeting: email=%s", email)
+            if not email:
+                logger.debug("_handle_create_meeting: нет email, отправка сообщения")
+                event.reply_text(
+                    "❌ Для создания собрания необходим email в профиле. "
+                    "Укажите email в настройках K-Chat."
+                )
+                return
+            is_admin = self.service.meeting_repo.is_admin(email)
+            logger.debug("_handle_create_meeting: is_admin=%s", is_admin)
+            if not is_admin:
+                logger.debug("_handle_create_meeting: не админ, отправка сообщения")
+                event.reply_text(
+                    self.config.get_message("create_meeting_not_admin")
+                    or "❌ Команда доступна только администраторам."
+                )
+                return
+            meeting_info = self.service.meeting_repo.get_meeting_info()
+            logger.debug("_handle_create_meeting: meeting_info=%s", bool(meeting_info))
+            if meeting_info:
+                logger.debug("_handle_create_meeting: собрание уже есть, отправка меню")
+                message = (
+                    "ℹ️ Собрание уже создано.\n\n"
+                    "Для редактирования используйте кнопку «✏️ Изменить» или «📅 Перенести»."
+                )
+                buttons = self._get_meeting_menu_buttons()
+                try:
+                    event.reply_text_message(MessageRequest(text=message, buttons=buttons))
+                    logger.debug("_handle_create_meeting: меню отправлено успешно")
+                except Exception as e:
+                    logger.error("Ошибка отправки меню собрания: %s", e, exc_info=True)
+                    event.reply_text(message)
+                return
+            logger.debug("_handle_create_meeting: запуск create_meeting_flow.start")
+            msg = self.create_meeting_flow.start(event)
+            logger.debug("_handle_create_meeting: получен ответ от flow, отправка сообщения")
+            event.reply_text(msg)
+            logger.debug("_handle_create_meeting: завершено")
+        except Exception as e:
+            logger.exception("Ошибка в _handle_create_meeting: %s", e)
             try:
-                event.reply_text_message(MessageRequest(text=message, buttons=buttons))
-            except Exception as e:
-                logger.error("Ошибка отправки меню собрания: %s", e)
-                event.reply_text(message)
-            return
-        msg = self.create_meeting_flow.start(event)
-        event.reply_text(msg)
+                event.reply_text("❌ Произошла ошибка при создании собрания. Попробуйте позже.")
+            except Exception:
+                pass
 
     def _handle_cancel(self, event: MessageBotEvent) -> None:
         """Команда /отмена — отмена активного диалога."""
@@ -538,13 +633,17 @@ class MeetingHandler:
 
     @staticmethod
     def _answer_is_no(answer: str) -> bool:
-        """Ответ «нет»: no или текст вроде «Нет, не смогу присутствовать»."""
+        """
+        Ответ «нет»: no или текст «Нет, не смогу», «Нет (Больничный)» и т.п.
+        """
         if not answer:
             return False
         s = answer.strip().lower()
         if s == "no":
             return True
         if "нет" in s or "не смогу" in s:
+            return True
+        if any(x in s for x in ("больничный", "командировка", "отпуск")):
             return True
         return False
 
@@ -620,39 +719,92 @@ class MeetingHandler:
                 result.append(parsed)
         return result
 
+    # ID кнопок приглашённых (200+) — не конфликтуют с другими кнопками
+    _INVITED_BTN_ADD = 200
+    _INVITED_BTN_DELETE = 201
+    _INVITED_BTN_SEARCH = 202
+    _INVITED_BTN_NOT_VOTED = 203
+    _INVITED_BTN_VOTED = 204
+    _INVITED_BTN_ALL = 205
+
     def _get_invited_buttons(
         self,
         invited: list,
         is_admin: bool,
+        filter_type: Optional[str] = None,
+        has_any_invited: bool = False,
     ) -> list:
         """
         Формирует кнопки для экрана приглашённых.
-        Без приглашённых: «Пригласить». С приглашёнными: «Добавить», «Удалить».
+        Без приглашённых и без фильтра: «Пригласить».
+        С приглашёнными или при активном фильтре: основные кнопки (Добавить, Удалить, Поиск, фильтры).
         Только для админов.
+        filter_type: None (все), "voted" (проголосовали), "not_voted" (не проголосовали).
+        has_any_invited: есть ли вообще приглашённые в базе (до фильтрации).
         """
         if not is_admin:
             return []
-        if not invited:
-            return [
+        
+        # Если есть активный фильтр или есть приглашённые в базе — показываем основные кнопки
+        if filter_type is not None or has_any_invited or invited:
+            buttons = [
                 InlineMessageButton(
-                    id=1,
-                    label="👋 Пригласить",
-                    callback_message="👋 Пригласить",
+                    id=self._INVITED_BTN_ADD,
+                    label="✨ Добавить",
+                    callback_message="✨ Добавить",
                     callback_data="invited_add",
                 ),
+                InlineMessageButton(
+                    id=self._INVITED_BTN_DELETE,
+                    label="🗑 Удалить",
+                    callback_message="🗑 Удалить",
+                    callback_data="invited_delete",
+                ),
+                InlineMessageButton(
+                    id=self._INVITED_BTN_SEARCH,
+                    label="🔍 Поиск",
+                    callback_message="🔍 Поиск",
+                    callback_data="invited_search",
+                ),
             ]
+            # Кнопка "Все" показывается только когда активен фильтр
+            if filter_type is not None:
+                buttons.append(
+                    InlineMessageButton(
+                        id=self._INVITED_BTN_ALL,
+                        label="📋 Все",
+                        callback_message="📋 Все",
+                        callback_data="invited_filter_all",
+                    ),
+                )
+            # Кнопки фильтрации (показываем всегда)
+            if filter_type != "not_voted":
+                buttons.append(
+                    InlineMessageButton(
+                        id=self._INVITED_BTN_NOT_VOTED,
+                        label="⏳ Не проголосовали",
+                        callback_message="⏳ Не проголосовали",
+                        callback_data="invited_filter_not_voted",
+                    ),
+                )
+            if filter_type != "voted":
+                buttons.append(
+                    InlineMessageButton(
+                        id=self._INVITED_BTN_VOTED,
+                        label="✅ Проголосовали",
+                        callback_message="✅ Проголосовали",
+                        callback_data="invited_filter_voted",
+                    ),
+                )
+            return buttons
+        
+        # Если нет приглашённых и нет фильтра — показываем только "Пригласить"
         return [
             InlineMessageButton(
-                id=1,
-                label="✨ Добавить",
-                callback_message="✨ Добавить",
+                id=self._INVITED_BTN_ADD,
+                label="👋 Пригласить",
+                callback_message="👋 Пригласить",
                 callback_data="invited_add",
-            ),
-            InlineMessageButton(
-                id=2,
-                label="🗑 Удалить",
-                callback_message="🗑 Удалить",
-                callback_data="invited_delete",
             ),
         ]
 
@@ -698,16 +850,38 @@ class MeetingHandler:
         msg = self.edit_delete_invited_flow.start(event, meeting_id)
         event.reply_text(msg)
 
+    def _handle_invited_search(self, event: MessageBotEvent) -> None:
+        """Кнопка «Поиск» — запрос строки поиска для фильтрации приглашённых."""
+        meeting_info = self.service.get_meeting_info()
+        if not meeting_info:
+            event.reply_text(
+                "ℹ️ Собраний пока нет.\n\n"
+                "📋 /собрание — создать собрание."
+            )
+            return
+        email = self.service.get_user_email(event)
+        if not email or not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("not_allowed")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        meeting_id = meeting_info.get("meeting_id")
+        msg = self.search_invited_flow.start(event, meeting_id)
+        event.reply_text(msg)
+
     def _handle_invited(
         self,
         event: MessageBotEvent,
         skip_parse_and_save: bool = False,
+        filter_type: Optional[str] = None,
     ) -> None:
         """
         Обрабатывает команду /приглашенные: список приглашённых из БД.
         ✅/❌ — по полю answer в Invited.
-        Админы: кнопки Пригласить/Добавить, Изменить, Удалить.
+        Админы: кнопки Пригласить/Добавить, Удалить, фильтры.
         skip_parse_and_save: True при вызове после add_invited_flow — только показ списка.
+        filter_type: None (все), "voted" (проголосовали), "not_voted" (не проголосовали).
         """
         meeting_info = self.service.get_meeting_info()
         if not meeting_info:
@@ -748,9 +922,25 @@ class MeetingHandler:
                 event.reply_text(msg)
                 return
 
-        invited = self.service.get_invited_list()
+        all_invited = self.service.get_invited_list()
+        has_any_invited = len(all_invited) > 0
+        
+        # Фильтрация по статусу голосования
+        if filter_type == "voted":
+            invited = [inv for inv in all_invited if inv.get("answer") or ""]
+            filter_label = "✅ Проголосовали"
+        elif filter_type == "not_voted":
+            invited = [inv for inv in all_invited if not (inv.get("answer") or "").strip()]
+            filter_label = "⏳ Не проголосовали"
+        else:
+            invited = all_invited
+            filter_label = None
+        
         dt_display = self.service.get_meeting_datetime_display()
-        header = f"👥 **Приглашённые** ({dt_display})\n" if dt_display else "👥 **Приглашённые**\n"
+        if filter_label:
+            header = f"👥 **Приглашённые** — {filter_label} ({dt_display})\n" if dt_display else f"👥 **Приглашённые** — {filter_label}\n"
+        else:
+            header = f"👥 **Приглашённые** ({dt_display})\n" if dt_display else "👥 **Приглашённые**\n"
         lines = [header]
         if not invited:
             #lines.append("")
@@ -779,7 +969,9 @@ class MeetingHandler:
                 lines.append(part)
         full_message = added_msg + "\n".join(lines)
 
-        buttons = self._get_invited_buttons(invited, is_admin)
+        buttons = self._get_invited_buttons(
+            invited, is_admin, filter_type=filter_type, has_any_invited=has_any_invited
+        )
         if buttons:
             try:
                 event.reply_text_message(MessageRequest(text=full_message, buttons=buttons))
@@ -798,9 +990,9 @@ class MeetingHandler:
         Обрабатывает ответ пользователя о присутствии.
         По образцу kchat-opros: сначала отправляем уведомление пользователю,
         затем сохраняем в таблицу (чтобы пользователь всегда видел ответ).
+        answer: ключ кнопки (yes, no, no_sick, no_business_trip, no_vacation).
         """
-        button_key = "yes" if answer == "yes" else "no"
-        button_config = self.config.get_button(button_key)
+        button_config = self.config.get_button(answer)
         answer_text = (
             button_config.get("answer_text", answer)
             if button_config

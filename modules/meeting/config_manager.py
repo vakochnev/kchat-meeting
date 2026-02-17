@@ -138,6 +138,27 @@ class MeetingConfigManager:
                     "callback_data": "meeting_no",
                     "answer_text": "Нет, не смогу присутствовать",
                 },
+                "no_sick": {
+                    "id": 3,
+                    "label": "❌ Нет (Больничный)",
+                    "callback_message": "❌ Нет (Больничный)",
+                    "callback_data": "meeting_no_sick",
+                    "answer_text": "Нет (Больничный)",
+                },
+                "no_business_trip": {
+                    "id": 4,
+                    "label": "❌ Нет (Командировка)",
+                    "callback_message": "❌ Нет (Командировка)",
+                    "callback_data": "meeting_no_business_trip",
+                    "answer_text": "Нет (Командировка)",
+                },
+                "no_vacation": {
+                    "id": 5,
+                    "label": "❌ Нет (Отпуск)",
+                    "callback_message": "❌ Нет (Отпуск)",
+                    "callback_data": "meeting_no_vacation",
+                    "answer_text": "Нет (Отпуск)",
+                },
             },
         }
     

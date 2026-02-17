@@ -11,3 +11,6 @@
 
 uv run alembic revision --autogenerate -m "initial"
 uv run alembic upgrade head
+
+
+3 127 904 031 509 955
