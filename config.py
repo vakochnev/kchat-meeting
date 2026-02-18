@@ -4,9 +4,14 @@
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Dict, Any, List
 
 from dotenv import load_dotenv
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 # Загружаем .env
 load_dotenv()
@@ -76,8 +81,41 @@ class Config:
         default_factory=lambda: os.getenv("EMAIL_TEMPLATE_PATH", "")
     )
     
-    # Настройки совещаний
-    # (оставлено для совместимости, если понадобится)
+    # Настройки совещаний из config.yml
+    meeting_settings: Dict[str, Any] = field(default_factory=dict)
+    
+    def __post_init__(self):
+        """Загружает настройки собраний из config.yml после инициализации."""
+        self._load_meeting_settings()
+    
+    def _load_meeting_settings(self) -> None:
+        """Загружает настройки собраний из config/meeting_settings.yml."""
+        if yaml is None:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning("PyYAML не установлен, настройки собраний не загружены")
+            self.meeting_settings = {}
+            return
+        
+        settings_file = self.base_dir / "config" / "meeting_settings.yml"
+        if settings_file.exists():
+            try:
+                with open(settings_file, "r", encoding="utf-8") as f:
+                    self.meeting_settings = yaml.safe_load(f) or {}
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(
+                    "Не удалось загрузить настройки собраний из %s: %s",
+                    settings_file, e
+                )
+                self.meeting_settings = {}
+        else:
+            self.meeting_settings = {}
+    
+    def get_meeting_schedules(self) -> List[Dict[str, Any]]:
+        """Возвращает список расписаний собраний из конфигурации."""
+        return self.meeting_settings.get("meetings", [])
     
     def validate(self) -> None:
         """Проверяет обязательные настройки."""

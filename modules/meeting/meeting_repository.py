@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 
-from db.models import Invited, Meeting, MeetingAdmin
+from db.models import Invited, Meeting, MeetingAdmin, PermanentInvited, User
 from db.session import get_session_context
 
 logger = logging.getLogger(__name__)
@@ -17,14 +17,21 @@ logger = logging.getLogger(__name__)
 
 def _normalize_phone(value: Optional[str]) -> Optional[str]:
     """
-    Нормализует номер телефона к формату 79991234567.
+    Нормализует номер телефона к формату 79991234567 или короткому формату (5 цифр).
     Убирает все нецифровые символы, 8 в начале заменяет на 7.
+    Поддерживает короткие номера (5 цифр) - возвращает как есть.
     """
     if not value or not value.strip():
         return None
     digits = re.sub(r"\D", "", value)
     if not digits:
         return None
+    
+    # Короткие номера (5 цифр) - возвращаем как есть
+    if len(digits) == 5:
+        return digits
+    
+    # Стандартные форматы мобильных номеров
     if len(digits) == 10 and digits[0] == "9":
         return "7" + digits
     if len(digits) == 11 and digits[0] == "8":
@@ -108,6 +115,7 @@ class MeetingRepository:
         """
         Возвращает список приглашённых в формате словарей.
         Если meeting_id не задан — для активного совещания.
+        Добавляет флаг exists_in_users для каждого приглашённого.
         """
         with get_session_context() as session:
             if meeting_id is not None:
@@ -122,15 +130,63 @@ class MeetingRepository:
                 return []
             stmt = select(Invited).where(Invited.meeting_id == meeting.id)
             rows = session.scalars(stmt).all()
-            return [
-                {
+            
+            # Получаем множество email'ов пользователей из таблицы users
+            users_emails = set()
+            if rows:
+                # Нормализуем email'ы из invited (убираем пробелы, приводим к нижнему регистру)
+                emails_from_invited = {
+                    (r.email or "").strip().lower() 
+                    for r in rows 
+                    if r.email and (r.email or "").strip()
+                }
+                logger.info(
+                    "get_invited_list: нормализованные email'ы из invited (%d): %s",
+                    len(emails_from_invited), emails_from_invited
+                )
+                if emails_from_invited:
+                    # Получаем все email'ы из users и нормализуем их в Python
+                    users_stmt = select(User.email).where(User.email.isnot(None))
+                    all_users_emails_raw = session.scalars(users_stmt).all()
+                    logger.info(
+                        "get_invited_list: найдено %d email'ов в таблице users",
+                        len(all_users_emails_raw)
+                    )
+                    # Нормализуем email'ы из users и фильтруем только те, что есть в invited
+                    for email_raw in all_users_emails_raw:
+                        if email_raw:
+                            email_normalized = (email_raw or "").strip().lower()
+                            logger.debug(
+                                "get_invited_list: проверка email из users: raw=%s normalized=%s",
+                                email_raw, email_normalized
+                            )
+                            if email_normalized and email_normalized in emails_from_invited:
+                                users_emails.add(email_normalized)
+                                logger.info(
+                                    "get_invited_list: найден совпадающий email: %s",
+                                    email_normalized
+                                )
+                    logger.info(
+                        "get_invited_list: итоговые совпадающие email'ы в users (%d): %s",
+                        len(users_emails), users_emails
+                    )
+            
+            result = []
+            for r in rows:
+                email_normalized = (r.email or "").strip().lower() if r.email else ""
+                exists_in_users = email_normalized in users_emails if email_normalized else False
+                logger.info(
+                    "get_invited_list: invited name='%s' email='%s' normalized='%s' exists_in_users=%s",
+                    r.full_name, r.email, email_normalized, exists_in_users
+                )
+                result.append({
                     "full_name": r.full_name or "",
                     "email": r.email or "",
                     "phone": r.phone or "",
                     "answer": r.answer or "",
-                }
-                for r in rows
-            ]
+                    "exists_in_users": exists_in_users,
+                })
+            return result
 
     def search_invited(
         self, meeting_id: int, query: str
@@ -166,12 +222,37 @@ class MeetingRepository:
                 if query_lower in full_name_lower or query_lower in email_lower:
                     results.append(inv)
             
+            # Получаем множество email'ов пользователей из таблицы users
+            users_emails = set()
+            if results:
+                # Нормализуем email'ы из результатов поиска (убираем пробелы, приводим к нижнему регистру)
+                emails_from_results = {
+                    (r.email or "").strip().lower() 
+                    for r in results 
+                    if r.email and (r.email or "").strip()
+                }
+                if emails_from_results:
+                    # Получаем все email'ы из users и нормализуем их в Python
+                    users_stmt = select(User.email).where(User.email.isnot(None))
+                    all_users_emails_raw = session.scalars(users_stmt).all()
+                    # Нормализуем email'ы из users и фильтруем только те, что есть в результатах поиска
+                    for email_raw in all_users_emails_raw:
+                        if email_raw:
+                            email_normalized = (email_raw or "").strip().lower()
+                            if email_normalized and email_normalized in emails_from_results:
+                                users_emails.add(email_normalized)
+            
             return [
                 {
                     "full_name": r.full_name or "",
                     "email": r.email or "",
                     "phone": r.phone or "",
                     "answer": r.answer or "",
+                    "exists_in_users": (
+                        (r.email or "").strip().lower() in users_emails 
+                        if r.email and (r.email or "").strip() 
+                        else False
+                    ),
                 }
                 for r in results
             ]
@@ -289,9 +370,7 @@ class MeetingRepository:
     ) -> int:
         """
         Создаёт новое собрание с заданными полями.
-
-        Только собрание (Meeting). Таблица invited не заполняется —
-        приглашённых добавляют отдельно по команде /приглашенные.
+        Автоматически добавляет постоянных приглашённых из таблицы permanent_invited.
         Возвращает ID созданного совещания.
         """
         with get_session_context() as session:
@@ -304,7 +383,32 @@ class MeetingRepository:
             )
             session.add(meeting)
             session.flush()
-            return meeting.id
+            meeting_id = meeting.id
+            
+            # Автоматически добавляем постоянных приглашённых
+            permanent_invited = session.scalars(select(PermanentInvited)).all()
+            if permanent_invited:
+                added_count = 0
+                for perm_inv in permanent_invited:
+                    invited = Invited(
+                        meeting_id=meeting_id,
+                        full_name=perm_inv.full_name,
+                        email=perm_inv.email,
+                        phone=perm_inv.phone,
+                    )
+                    try:
+                        with session.begin_nested():
+                            session.add(invited)
+                            session.flush()
+                        added_count += 1
+                    except IntegrityError:
+                        pass
+                logger.info(
+                    "create_new_meeting: добавлено постоянных приглашённых: %d из %d",
+                    added_count, len(permanent_invited)
+                )
+            
+            return meeting_id
 
     def copy_invited_to_meeting(
         self,
@@ -312,7 +416,7 @@ class MeetingRepository:
         target_meeting_id: int,
     ) -> int:
         """
-        Копирует приглашённых из source в target с status=invited, answer=None.
+        Копирует приглашённых из source в target с answer=None (статусы не копируются).
         Возвращает количество скопированных записей.
         """
         with get_session_context() as session:
@@ -326,7 +430,7 @@ class MeetingRepository:
                     email=inv.email,
                     phone=inv.phone,
                     answer=None,
-                    status="invited",
+                    # Статусы (kchat_status, email_status, sms_status) не копируются
                 )
                 try:
                     with session.begin_nested():
@@ -433,3 +537,93 @@ class MeetingRepository:
             return datetime(year, month, day, t.hour, t.minute, t.second)
         except (ValueError, TypeError):
             return None
+
+    def get_permanent_invited_list(self) -> List[Dict[str, Any]]:
+        """
+        Возвращает список постоянных приглашённых в формате словарей.
+        """
+        with get_session_context() as session:
+            rows = session.scalars(select(PermanentInvited)).all()
+            return [
+                {
+                    "full_name": r.full_name or "",
+                    "email": r.email or "",
+                    "phone": r.phone or "",
+                }
+                for r in rows
+            ]
+
+    def save_permanent_invited(
+        self,
+        full_name: str,
+        email: str,
+        phone: Optional[str] = None,
+    ) -> bool:
+        """
+        Добавляет или обновляет постоянного приглашённого.
+        Возвращает True если добавлен, False если обновлён.
+        """
+        with get_session_context() as session:
+            email_norm = email.strip().lower()
+            existing = session.scalar(
+                select(PermanentInvited).where(
+                    func.lower(PermanentInvited.email) == email_norm
+                )
+            )
+            phone_norm = _normalize_phone(phone) if phone else None
+            if existing:
+                existing.full_name = full_name.strip() or None
+                existing.phone = phone_norm
+                logger.info("save_permanent_invited: обновлён %s", email_norm)
+                return False
+            else:
+                perm_inv = PermanentInvited(
+                    full_name=full_name.strip() or None,
+                    email=email_norm,
+                    phone=phone_norm,
+                )
+                session.add(perm_inv)
+                logger.info("save_permanent_invited: добавлен %s", email_norm)
+                return True
+
+    def delete_permanent_invited(self, email: str) -> bool:
+        """
+        Удаляет постоянного приглашённого по email.
+        Возвращает True если удалён, False если не найден.
+        """
+        with get_session_context() as session:
+            email_norm = email.strip().lower()
+            perm_inv = session.scalar(
+                select(PermanentInvited).where(
+                    func.lower(PermanentInvited.email) == email_norm
+                )
+            )
+            if not perm_inv:
+                return False
+            session.delete(perm_inv)
+            logger.info("delete_permanent_invited: удалён %s", email_norm)
+            return True
+
+    def search_permanent_invited(self, query: str) -> List[Dict[str, Any]]:
+        """
+        Ищет постоянных приглашённых по ФИО или email.
+        Поиск выполняется на стороне Python для надёжности с NULL значениями.
+        """
+        query_lower = query.strip().lower()
+        if not query_lower:
+            return []
+        
+        all_permanent = self.get_permanent_invited_list()
+        results = []
+        
+        for perm in all_permanent:
+            full_name = (perm.get("full_name") or "").strip()
+            email = (perm.get("email") or "").strip()
+            
+            full_name_lower = full_name.lower() if full_name else ""
+            email_lower = email.lower() if email else ""
+            
+            if query_lower in full_name_lower or query_lower in email_lower:
+                results.append(perm)
+        
+        return results

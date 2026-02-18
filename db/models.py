@@ -97,6 +97,25 @@ class MeetingAdmin(BaseModel):
         return f"<MeetingAdmin(id={self.id}, email={self.email})>"
 
 
+class PermanentInvited(BaseModel):
+    """
+    Постоянный приглашённый на собрания.
+    Эти пользователи автоматически добавляются в каждое новое собрание.
+    """
+
+    __tablename__ = "permanent_invited"
+    __table_args__ = (UniqueConstraint("email", name="uq_permanent_invited_email"),)
+
+    full_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    email: Mapped[str] = mapped_column(
+        String(255), nullable=False, unique=True, index=True
+    )
+
+    def __repr__(self) -> str:
+        return f"<PermanentInvited(id={self.id}, email={self.email}, full_name={self.full_name})>"
+
+
 class Invited(BaseModel):
     """
     Приглашённый на совещание.

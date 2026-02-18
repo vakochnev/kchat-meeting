@@ -7,6 +7,7 @@ from .models import (
     Invited,
     Meeting,
     MeetingAdmin,
+    PermanentInvited,
     User,
 )
 from .user_repository import UserRepository
@@ -23,6 +24,7 @@ __all__ = [
     'Invited',
     'Meeting',
     'MeetingAdmin',
+    'PermanentInvited',
     'User',
     'UserRepository',
     'get_engine',

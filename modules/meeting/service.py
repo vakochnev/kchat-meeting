@@ -349,7 +349,8 @@ class MeetingService:
 
     def check_user_allowed(self, event: MessageBotEvent) -> bool:
         """
-        Проверяет допуск по email: пользователь в списке приглашённых или админ.
+        Проверяет допуск к боту: пользователь в списке приглашённых или админ.
+        Используется для общего доступа к командам бота.
         """
         user_data = self._get_user_data_from_event(event)
         if user_data is None:
@@ -367,15 +368,53 @@ class MeetingService:
         if allowed:
             reason = "приглашён" if in_invited else "админ"
             logger.info(
-                "Пользователь допущен к совещанию: sender_id=%s (%s)",
+                "Пользователь допущен к боту: sender_id=%s (%s)",
                 event.sender_id, reason
             )
         else:
             logger.info(
-                "Пользователь НЕ допущен к совещанию: sender_id=%s (не найден в списке приглашённых или совещание в прошлом)",
+                "Пользователь НЕ допущен к боту: sender_id=%s (не найден в списке приглашённых или совещание в прошлом)",
                 event.sender_id
             )
         return allowed
+
+    def check_user_can_vote(self, event: MessageBotEvent) -> bool:
+        """
+        Проверяет право голосования: пользователь должен быть в таблице invited.
+        Админы НЕ могут голосовать, даже если они есть в invited.
+        """
+        user_data = self._get_user_data_from_event(event)
+        if user_data is None:
+            logger.debug(
+                "vote_check: sender_id=%s — нет email",
+                event.sender_id,
+            )
+            return False
+
+        email = (user_data.get("email") or "").strip().lower()
+        is_admin = bool(email and self.meeting_repo.is_admin(email))
+        
+        if is_admin:
+            logger.info(
+                "Пользователь НЕ может голосовать: sender_id=%s (админ)",
+                event.sender_id
+            )
+            return False
+
+        in_invited = self._meeting_id_if_invited(user_data) is not None
+        
+        if in_invited:
+            logger.info(
+                "Пользователь может голосовать: sender_id=%s (приглашён)",
+                event.sender_id
+            )
+        else:
+            logger.info(
+                "Пользователь НЕ может голосовать: sender_id=%s (не найден в списке приглашённых)",
+                event.sender_id
+            )
+        
+        return in_invited
 
     def get_user_email(self, event: MessageBotEvent) -> Optional[str]:
         """
@@ -631,7 +670,6 @@ class MeetingService:
             email=user["email"],
             meeting_id=meeting_id,
             answer=answer,
-            status="answered",
             full_name=user.get("full_name"),
             phone=user.get("phone"),
         ):

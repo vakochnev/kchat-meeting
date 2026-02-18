@@ -20,6 +20,16 @@
   - Alembic для миграций
   - Таблица `meeting_admins` — администраторы собраний
   - Таблица `invited` — список приглашённых и ответы о присутствии
+  - Таблица `permanent_invited` — постоянные приглашённые (автоматически добавляются в каждое собрание)
+
+- **Конфигурация:**
+  - Настройки регулярных собраний в `config/meeting_settings.yml`
+  - Постоянные приглашённые из конфигурации автоматически загружаются в БД при старте
+  - Таблица `permanent_invited` — постоянные приглашённые (автоматически добавляются в каждое собрание)
+
+- **Конфигурация:**
+  - Настройки регулярных собраний в `config/meeting_settings.yml`
+  - Постоянные приглашённые из конфигурации автоматически загружаются в БД при старте
 
 ## Быстрый старт
 
@@ -63,10 +73,31 @@ LOG_LEVEL=INFO
 
 ```bash
 uv run alembic upgrade head
-uv run python scripts/seed_meeting_admins.py
+uv run python tools/seed_meeting_admins.py
 ```
 
-### 5. Запуск
+### 5. Загрузка постоянных приглашённых (опционально)
+
+```bash
+# Просмотр что будет загружено (dry-run)
+uv run python tools/seed_permanent_invited.py --file config/permanent_invited.txt --dry-run
+
+# Загрузка из файла
+uv run python tools/seed_permanent_invited.py --file config/permanent_invited.txt
+
+# Загрузка с обновлением существующих записей
+uv run python tools/seed_permanent_invited.py --file config/permanent_invited.txt --update
+```
+
+Формат файла `config/permanent_invited.txt`:
+```
+# Комментарии начинаются с #
+# Формат: ФИО | email | телефон (телефон опционален)
+Иванов Иван Иванович | ivanov@example.com | +79991234567
+Петров Петр Петрович | petrov@example.com
+```
+
+### 6. Запуск
 
 ```bash
 uv run python main.py
@@ -187,10 +218,9 @@ kchat-meeting/
 │   │   ├── config_manager.py
 │   │   └── ...
 │   └── answers/            # Обработчики типов ответов
-├── scripts/
-│   └── seed_meeting_admins.py  # Инициализация meeting_admins
 ├── tools/
-│   └── bot_health_check.py  # Проверка жизни бота
+│   ├── bot_health_check.py  # Проверка жизни бота
+│   └── seed_permanent_invited.py  # Загрузка постоянных приглашённых из файла
 ├── alembic/                # Миграции БД
 ├── config.py               # Конфигурация
 ├── main.py                 # Точка входа
@@ -214,6 +244,8 @@ kchat-meeting/
 
 ## Конфигурация совещаний
 
+### Настройки сообщений бота
+
 JSON-файл `config/meeting.json` содержит тексты сообщений бота:
 
 ```json
@@ -225,6 +257,28 @@ JSON-файл `config/meeting.json` содержит тексты сообщен
   }
 }
 ```
+
+### Настройки регулярных собраний
+
+YAML-файл `config/meeting_settings.yml` содержит настройки регулярных собраний:
+
+```yaml
+# Настройки регулярных собраний
+meetings:
+  # Каждую неделю в понедельник в 11:00
+  - schedule:
+      type: "weekly"  # weekly, daily, cron
+      day_of_week: 0  # 0=понедельник, 1=вторник, ..., 6=воскресенье
+      time: "11:00"
+    topic: "Планирование недели"
+    place: ""  # опционально
+    link: ""   # опционально
+```
+
+**Примечания:**
+- Постоянные приглашённые управляются через таблицу `permanent_invited` в БД администраторами собраний (meeting_admins) через интерфейс бота
+- Постоянные приглашённые автоматически добавляются в каждое новое собрание при его создании
+- Для работы с расписанием собраний (автоматическое создание) требуется дополнительная реализация планировщика
 
 ## Лицензия
 

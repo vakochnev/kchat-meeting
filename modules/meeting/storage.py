@@ -55,7 +55,6 @@ class MeetingStorage:
         email: str,
         meeting_id: int,
         answer: str,
-        status: Optional[str] = None,
         full_name: Optional[str] = None,
         phone: Optional[str] = None,
     ) -> bool:
@@ -79,8 +78,7 @@ class MeetingStorage:
                 )
                 return False
             inv.answer = answer
-            if status:
-                inv.status = status
+            # Поле status удалено из модели Invited, используются kchat_status, email_status, sms_status
             if full_name is not None:
                 inv.full_name = full_name.strip() or inv.full_name
             if phone is not None:
