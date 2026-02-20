@@ -45,7 +45,6 @@ COMMANDS = {
     "/отправить": "send",
     "/неголосовали": "invited_not_voted",
     "/голосовали": "invited_voted",
-    "/все": "invited_all",
 }
 
 
@@ -63,6 +62,10 @@ class MeetingHandler:
         self.add_permanent_invited_flow = AddPermanentInvitedFlow()
         self.edit_delete_permanent_invited_flow = EditDeletePermanentInvitedFlow()
         self.search_permanent_invited_flow = SearchPermanentInvitedFlow()
+        # Хранилище последнего активного фильтра по sender_id
+        self._user_filter_context: dict[int, Optional[str]] = {}
+        # Хранилище контекста просмотра участников по sender_id
+        self._user_participants_context: dict[int, bool] = {}
     
     def handle_message(self, event: MessageBotEvent) -> None:
         """Обрабатывает входящее сообщение."""
@@ -86,15 +89,78 @@ class MeetingHandler:
         text_lower = text.lower()
         command = COMMANDS.get(text_lower)
         if not command and text_lower.startswith("/приглашенные"):
+            # Сбрасываем контекст участников при переходе к приглашенным
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_participants_context[sender_id] = False
             command = "invited"
-        if not command and text_lower.startswith("/участники"):
+        # Обработка команд пагинации для участников (/участники2, /участники3 и т.д.)
+        if not command:
+            participants_match = re.match(r"^/участники(\d+)$", text_lower)
+            if participants_match:
+                page_num = int(participants_match.group(1))
+                setattr(event, "_page_number", page_num)
+                setattr(event, "_participants_page", True)
+                # Устанавливаем контекст участников
+                sender_id = getattr(event, "sender_id", None)
+                if sender_id:
+                    self._user_participants_context[sender_id] = True
+                command = "participants_page"
+        if not command and text_lower == "/участники":
+            # Устанавливаем контекст участников для последующей пагинации
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_participants_context[sender_id] = True
             command = "participants"
-        if not command and text_lower.startswith("/неголосовали"):
+        # Обработка команд фильтрации без пагинации (/неголосовали, /голосовали)
+        if not command and text_lower == "/неголосовали":
+            # Сохраняем контекст фильтра для последующей пагинации
+            # Сбрасываем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_filter_context[sender_id] = "not_voted"
+                self._user_participants_context[sender_id] = False
             command = "invited_not_voted"
-        if not command and text_lower.startswith("/голосовали"):
+        if not command and text_lower == "/голосовали":
+            # Сохраняем контекст фильтра для последующей пагинации
+            # Сбрасываем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_filter_context[sender_id] = "voted"
+                self._user_participants_context[sender_id] = False
             command = "invited_voted"
         if not command and text_lower.startswith("/все"):
-            command = "invited_all"
+            # Проверяем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            is_participants_context = self._user_participants_context.get(sender_id, False) if sender_id else False
+            
+            if is_participants_context:
+                # Это команда для показа всех участников без пагинации
+                command = "participants_all"
+            else:
+                # Сбрасываем контекст фильтра и участников при команде /все для приглашенных
+                if sender_id:
+                    self._user_filter_context[sender_id] = None
+                    self._user_participants_context[sender_id] = False
+                command = "invited_all"
+        # Обработка команд для пагинации страниц (/2, /3 и т.д.)
+        if not command and re.match(r"^/\d+$", text_lower):
+            page_num = int(text_lower[1:])
+            # Сохраняем номер страницы в атрибуте события
+            setattr(event, "_page_number", page_num)
+            # Проверяем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            is_participants_context = self._user_participants_context.get(sender_id, False) if sender_id else False
+            
+            if is_participants_context:
+                # Это команда для пагинации участников
+                command = "participants_page"
+            else:
+                # Получаем контекст фильтра из хранилища для приглашенных
+                filter_type = self._user_filter_context.get(sender_id) if sender_id else None
+                setattr(event, "_filter_type", filter_type)
+                # Определяем контекст: если это список приглашённых, используем invited_page
+                command = "invited_page"
 
         if command:
             if command == "skip":
@@ -244,7 +310,7 @@ class MeetingHandler:
             )
             event.reply_text(msg)
             if done:
-                self._handle_participants(event, skip_parse_and_save=True)
+                self._handle_participants(event, skip_parse_and_save=True, page=1)
             return
 
         # Ожидание строки поиска для постоянных участников
@@ -289,7 +355,7 @@ class MeetingHandler:
             )
             event.reply_text(msg)
             if done:
-                self._handle_participants(event, skip_parse_and_save=True)
+                self._handle_participants(event, skip_parse_and_save=True, page=1)
             return
 
         # Список без /приглашенные добавить — парсим и сохраняем, если админ и есть собрание
@@ -418,20 +484,73 @@ class MeetingHandler:
             self._handle_meeting_check(event)
 
         elif command == "invited":
+            # Сбрасываем контекст фильтра и участников при команде /приглашенные
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_filter_context[sender_id] = None
+                self._user_participants_context[sender_id] = False
             self._handle_invited(event)
 
         elif command == "invited_not_voted":
+            # Сохраняем контекст фильтра для последующей пагинации
+            # Сбрасываем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_filter_context[sender_id] = "not_voted"
+                self._user_participants_context[sender_id] = False
             self._handle_invited(event, filter_type="not_voted")
 
         elif command == "invited_voted":
+            # Сохраняем контекст фильтра для последующей пагинации
+            # Сбрасываем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_filter_context[sender_id] = "voted"
+                self._user_participants_context[sender_id] = False
             self._handle_invited(event, filter_type="voted")
 
         elif command == "invited_all":
-            self._handle_invited(event, filter_type=None)
+            # Команда /все - показываем весь список без пагинации
+            # Сбрасываем контекст фильтра и участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_filter_context[sender_id] = None
+                self._user_participants_context[sender_id] = False
+            # Всегда используем _handle_invited для показа списка приглашённых
+            self._handle_invited(event, filter_type=None, page=None)
+
+        elif command == "invited_page":
+            # Команда для перехода на страницу списка приглашённых (/2, /3, /неголосовали2, /голосовали2 и т.д.)
+            # Сбрасываем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_participants_context[sender_id] = False
+            page_num = getattr(event, "_page_number", 1)
+            filter_type = getattr(event, "_filter_type", None)
+            # Всегда используем _handle_invited для показа списка приглашённых с пагинацией
+            self._handle_invited(event, filter_type=filter_type, page=page_num)
 
         elif command == "participants":
             # Команда доступна только для админов (проверка уже есть в _handle_participants)
-            self._handle_participants(event)
+            # Показываем первую страницу с пагинацией
+            self._handle_participants(event, page=1)
+        
+        elif command == "participants_page":
+            # Команда для перехода на страницу списка участников (/2, /3 и т.д.)
+            # Устанавливаем контекст участников для последующей пагинации
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_participants_context[sender_id] = True
+            page_num = getattr(event, "_page_number", 1)
+            self._handle_participants(event, page=page_num)
+        
+        elif command == "participants_all":
+            # Команда /все - показываем весь список участников без пагинации
+            # Устанавливаем контекст участников
+            sender_id = getattr(event, "sender_id", None)
+            if sender_id:
+                self._user_participants_context[sender_id] = True
+            self._handle_participants(event, page=None)
 
         elif command == "send":
             # Команда доступна только для админов
@@ -459,7 +578,7 @@ class MeetingHandler:
             self._show_help(event)
     
     def _create_meeting_from_schedule(
-        self, event: MessageBotEvent, admin_email: str
+        self, event: MessageBotEvent, admin_email: str, page: Optional[int] = 1
     ) -> bool:
         """
         Создаёт новое собрание из настроек расписания для админа.
@@ -520,40 +639,28 @@ class MeetingHandler:
             if invited_count > 0:
                 message_parts.append("")
                 message_parts.append("**Список приглашённых:**")
-                sorted_invited = sorted(
-                    invited_list,
-                    key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
-                )
-                for i, inv in enumerate(sorted_invited[:20], 1):  # Показываем первые 20
-                    name = inv.get("full_name") or "(без ФИО)"
-                    email = inv.get("email") or ""
-                    answer = inv.get("answer") or ""
-                    # Явно проверяем exists_in_users, так как это ключевое поле для определения иконки
-                    exists_in_users = bool(inv.get("exists_in_users", False))
-                    
-                    # Определяем иконку статуса
-                    if self._answer_is_yes(answer):
-                        icon = "✅ "
-                    elif self._answer_is_no(answer):
-                        icon = "❌ "
-                    elif answer:
-                        icon = "⏳ "
-                    else:
-                        # Не проголосовал: проверяем наличие в таблице users
-                        if exists_in_users:
-                            icon = "⏳ "
-                        else:
-                            icon = "❓ "
-                    
-                    part = f"{i}. {icon}{name}"
-                    if email:
-                        part += f" — {email}"
-                    if answer:
-                        part += f" ({answer})"
-                    message_parts.append(part)
                 
-                if invited_count > 20:
-                    message_parts.append(f"... и ещё {invited_count - 20} участников")
+                # Используем пагинацию
+                list_lines, current_page, total_pages = self._format_invited_list_paginated(
+                    invited_list, page=page
+                )
+                message_parts.extend(list_lines)
+                
+                # Добавляем номера страниц после списка
+                if total_pages > 1:
+                    page_items = []
+                    for p in range(1, total_pages + 1):
+                        if p == current_page:
+                            page_items.append(str(p))
+                        else:
+                            page_items.append(f"/{p}")
+                    page_items.append("/все")
+                    message_parts.append("")
+                    message_parts.append(f"Страницы: {' '.join(page_items)}")
+            
+            # Добавляем команду помощи в конце сообщения
+            message_parts.append("")
+            message_parts.append("❓ /помощь — список команд")
             
             message = "\n".join(message_parts)
             event.reply_text(message)
@@ -579,7 +686,7 @@ class MeetingHandler:
             )
             return False
 
-    def _show_meeting_info_to_admin(self, event: MessageBotEvent, meeting_id: Optional[int] = None) -> None:
+    def _show_meeting_info_to_admin(self, event: MessageBotEvent, meeting_id: Optional[int] = None, page: Optional[int] = 1) -> None:
         """
         Показывает информацию о собрании админу: детали собрания и список приглашённых.
         """
@@ -622,52 +729,92 @@ class MeetingHandler:
         if invited_count > 0:
             message_parts.append("")
             message_parts.append("**Список приглашённых:**")
-            sorted_invited = sorted(
-                invited_list,
-                key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
-            )
-            for i, inv in enumerate(sorted_invited[:20], 1):  # Показываем первые 20
-                name = inv.get("full_name") or "(без ФИО)"
-                email = inv.get("email") or ""
-                answer = inv.get("answer") or ""
-                # Явно проверяем exists_in_users, так как это ключевое поле для определения иконки
-                exists_in_users = bool(inv.get("exists_in_users", False))
-                
-                logger.info(
-                    "_show_meeting_info_to_admin: invited name='%s' email='%s' answer='%s' exists_in_users=%s (type=%s)",
-                    name, email, answer, exists_in_users, type(inv.get("exists_in_users"))
+            
+            # Используем пагинацию только если page не None
+            if page is not None:
+                list_lines, current_page, total_pages = self._format_invited_list_paginated(
+                    invited_list, page=page
                 )
+                message_parts.extend(list_lines)
                 
-                # Определяем иконку статуса
-                if self._answer_is_yes(answer):
-                    icon = "✅ "
-                elif self._answer_is_no(answer):
-                    icon = "❌ "
-                elif answer:
-                    icon = "⏳ "
-                else:
-                    # Не проголосовал: проверяем наличие в таблице users
-                    if exists_in_users:
+                # Добавляем номера страниц после списка
+                if total_pages > 1:
+                    page_items = []
+                    for p in range(1, total_pages + 1):
+                        if p == current_page:
+                            page_items.append(str(p))
+                        else:
+                            page_items.append(f"/{p}")
+                    page_items.append("/все")
+                    message_parts.append("")
+                    message_parts.append(f"Страницы: {' '.join(page_items)}")
+            else:
+                # Показываем весь список без пагинации
+                sorted_invited = sorted(
+                    invited_list,
+                    key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
+                )
+                for i, inv in enumerate(sorted_invited):
+                    name = inv.get("full_name") or "(без ФИО)"
+                    email = inv.get("email") or ""
+                    answer = inv.get("answer") or ""
+                    exists_in_users = bool(inv.get("exists_in_users", False))
+                    
+                    # Определяем иконку статуса
+                    if self._answer_is_yes(answer):
+                        icon = "✅ "
+                    elif self._answer_is_no(answer):
+                        icon = "❌ "
+                    elif answer:
                         icon = "⏳ "
                     else:
-                        icon = "❓ "
-                        logger.info(
-                            "_show_meeting_info_to_admin: пользователь '%s' (%s) не найден в users, используем ❓",
-                            name, email
-                        )
-                
-                part = f"{i}. {icon}{name}"
-                if email:
-                    part += f" — {email}"
-                if answer:
-                    part += f" ({answer})"
-                message_parts.append(part)
-            
-            if invited_count > 20:
-                message_parts.append(f"... и ещё {invited_count - 20} участников")
+                        # Не проголосовал: проверяем наличие в таблице users
+                        if exists_in_users:
+                            icon = "⏳ "
+                        else:
+                            icon = "⚠️ "
+                    
+                    part = f"{i + 1}. {icon}{name}"
+                    if email:
+                        part += f" — {email}"
+                    if answer:
+                        part += f" ({answer})"
+                    message_parts.append(part)
+        
+        # Проверяем, является ли пользователь админом
+        email = self.service.get_user_email(event)
+        is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+        has_any_invited = len(invited_list) > 0
+        
+        # Добавляем команды фильтрации в текст сообщения (только для админов)
+        if is_admin and has_any_invited:
+            # Добавляем пустую строку перед командами фильтрации
+            message_parts.append("")
+            # Показываем команды фильтров (в контексте просмотра собрания фильтр не активен)
+            message_parts.append("/неголосовали - приглашенные без отметки")
+            message_parts.append("/голосовали - приглашенные с отметкой")
+        
+        # Добавляем команду помощи и "Выберите действие:" перед кнопками (только для админов)
+        if is_admin:
+            message_parts.append("")
+            message_parts.append("❓ /помощь — список команд")
+            message_parts.append("")
+            message_parts.append("Выберите действие:")
         
         message = "\n".join(message_parts)
-        event.reply_text(message)
+        
+        # Добавляем кнопки действий для админов
+        buttons = self._get_invited_buttons(
+            invited_list, is_admin, filter_type=None, has_any_invited=has_any_invited
+        )
+        if buttons:
+            try:
+                event.reply_text_message(MessageRequest(text=message, buttons=buttons))
+            except Exception as e:
+                logger.error("Ошибка отправки сообщения с кнопками: %s", e)
+                event.reply_text(message)
+        else:
+            event.reply_text(message)
         
         # Автоматический вывод справки отключён; /помощь вызывается только по команде
         # self._show_help(event)
@@ -941,6 +1088,7 @@ class MeetingHandler:
         elif self.add_invited_flow.is_active(event):
             msg = self.add_invited_flow.cancel(event)
             event.reply_text(msg)
+            self._handle_invited(event, skip_parse_and_save=True)
         elif self.edit_delete_invited_flow.is_active(event):
             msg = self.edit_delete_invited_flow.cancel(event)
             event.reply_text(msg)
@@ -948,16 +1096,19 @@ class MeetingHandler:
         elif self.add_permanent_invited_flow.is_active(event):
             msg = self.add_permanent_invited_flow.cancel(event)
             event.reply_text(msg)
+            self._handle_participants(event, skip_parse_and_save=True, page=1)
         elif self.edit_delete_permanent_invited_flow.is_active(event):
             msg = self.edit_delete_permanent_invited_flow.cancel(event)
             event.reply_text(msg)
-            self._handle_participants(event, skip_parse_and_save=True)
+            self._handle_participants(event, skip_parse_and_save=True, page=1)
         elif self.search_permanent_invited_flow.is_active(event):
             msg = self.search_permanent_invited_flow.cancel(event)
             event.reply_text(msg)
+            self._handle_participants(event, skip_parse_and_save=True, page=1)
         elif self.search_invited_flow.is_active(event):
             msg = self.search_invited_flow.cancel(event)
             event.reply_text(msg)
+            self._handle_invited(event, skip_parse_and_save=True)
         else:
             # Нет активного диалога - выводим информативное сообщение
             event.reply_text(
@@ -1013,6 +1164,69 @@ class MeetingHandler:
         else:
             event.reply_text(self.config.get_message("not_allowed"))
 
+    def _format_invited_list_paginated(
+        self,
+        invited_list: List[Dict[str, Any]],
+        page: int = 1,
+    ) -> tuple[List[str], int, int]:
+        """
+        Форматирует список приглашённых с пагинацией.
+        
+        Args:
+            invited_list: Список приглашённых
+            page: Номер страницы (начинается с 1)
+            
+        Returns:
+            Кортеж (строки для сообщения, текущая страница, всего страниц)
+        """
+        per_page = self.config.get_invited_per_page()
+        total = len(invited_list)
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+        
+        # Ограничиваем номер страницы
+        page = max(1, min(page, total_pages))
+        
+        # Сортируем список
+        sorted_invited = sorted(
+            invited_list,
+            key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
+        )
+        
+        # Вычисляем диапазон для текущей страницы
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_items = sorted_invited[start_idx:end_idx]
+        
+        lines = []
+        for i, inv in enumerate(page_items, start=start_idx + 1):
+            name = inv.get("full_name") or "(без ФИО)"
+            email = inv.get("email") or ""
+            answer = inv.get("answer") or ""
+            exists_in_users = bool(inv.get("exists_in_users", False))
+            
+            # Определяем иконку статуса
+            if self._answer_is_yes(answer):
+                icon = "✅ "
+            elif self._answer_is_no(answer):
+                icon = "❌ "
+            elif answer:
+                icon = "⏳ "
+            else:
+                # Не проголосовал: проверяем наличие в таблице users
+                if exists_in_users:
+                    icon = "⏳ "
+                else:
+                    icon = "⚠️ "
+            
+            part = f"{i}. {icon}{name}"
+            if email:
+                part += f" — {email}"
+            if answer:
+                part += f" ({answer})"
+            lines.append(part)
+        
+        return lines, page, total_pages
+    
     @staticmethod
     def _normalize_fio(fio: str) -> str:
         """Нормализует ФИО для сопоставления: пробелы, регистр."""
@@ -1249,6 +1463,7 @@ class MeetingHandler:
         event: MessageBotEvent,
         skip_parse_and_save: bool = False,
         filter_type: Optional[str] = None,
+        page: Optional[int] = 1,
     ) -> None:
         """
         Обрабатывает команду /приглашенные: список приглашённых из БД.
@@ -1311,41 +1526,88 @@ class MeetingHandler:
             filter_label = None
         
         dt_display = self.service.get_meeting_datetime_display()
+        total_count = len(all_invited)
+        filtered_count = len(invited)
+        
+        # Формируем заголовок
         if filter_label:
             header = f"👥 **Приглашённые** — {filter_label} ({dt_display})\n" if dt_display else f"👥 **Приглашённые** — {filter_label}\n"
         else:
             header = f"👥 **Приглашённые** ({dt_display})\n" if dt_display else "👥 **Приглашённые**\n"
+        
         lines = [header]
+        
+        # Добавляем информацию о количестве
+        if filter_label:
+            # При фильтрах показываем количество отфильтрованных
+            if filter_type == "voted":
+                count_label = f"👥 **Проголосовали:** {filtered_count}"
+            elif filter_type == "not_voted":
+                count_label = f"👥 **Не проголосовали:** {filtered_count}"
+            else:
+                count_label = f"👥 **Приглашено участников:** {filtered_count}"
+            lines.append(count_label)
+        else:
+            # Без фильтра показываем общее количество
+            lines.append(f"👥 **Приглашено участников:** {total_count}")
+        
+        lines.append("")  # Пустая строка для разделения
+        
         if not invited:
             #lines.append("")
             lines.append("Список пуст.")
         else:
-            sorted_invited = sorted(
-                invited,
-                key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
-            )
-            for i, inv in enumerate(sorted_invited):
-                num = f"{i + 1}."
-                fio = (inv.get("full_name") or "").strip() or "—"
-                contact = inv.get("email") or inv.get("phone") or ""
-                answer = inv.get("answer") or ""
-                exists_in_users = inv.get("exists_in_users", False)
-                if self._answer_is_yes(answer):
-                    icon = "✅ "
-                elif self._answer_is_no(answer):
-                    icon = "❌ "
-                else:
-                    # Не проголосовал: проверяем наличие в таблице users
-                    if exists_in_users:
-                        icon = "⏳ "
+            # Используем пагинацию только если page не None
+            if page is not None:
+                list_lines, current_page, total_pages = self._format_invited_list_paginated(
+                    invited, page=page
+                )
+                lines.extend(list_lines)
+                
+                # Добавляем номера страниц после списка
+                if total_pages > 1:
+                    page_items = []
+                    # Всегда используем простые команды /1, /2, /3 и т.д.
+                    for p in range(1, total_pages + 1):
+                        if p == current_page:
+                            page_items.append(str(p))
+                        else:
+                            page_items.append(f"/{p}")
+                    page_items.append("/все")
+                    lines.append("")
+                    lines.append(f"Страницы: {' '.join(page_items)}")
+            else:
+                # Показываем весь список без пагинации
+                sorted_invited = sorted(
+                    invited,
+                    key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
+                )
+                for i, inv in enumerate(sorted_invited):
+                    num = f"{i + 1}."
+                    fio = (inv.get("full_name") or "").strip() or "—"
+                    contact = inv.get("email") or inv.get("phone") or ""
+                    answer = inv.get("answer") or ""
+                    exists_in_users = inv.get("exists_in_users", False)
+                    if self._answer_is_yes(answer):
+                        icon = "✅ "
+                    elif self._answer_is_no(answer):
+                        icon = "❌ "
                     else:
-                        icon = "❓ "
-                part = f"{num} {icon}{fio}"
-                if contact:
-                    part += f" — {contact}"
-                if answer:
-                    part += f" ({answer})"
-                lines.append(part)
+                        # Не проголосовал: проверяем наличие в таблице users
+                        if exists_in_users:
+                            icon = "⏳ "
+                        else:
+                            icon = "⚠️ "
+                    part = f"{num} {icon}{fio}"
+                    if contact:
+                        part += f" — {contact}"
+                    if answer:
+                        part += f" ({answer})"
+                    lines.append(part)
+                
+                # Добавляем команду помощи в конец списка (когда показывается весь список без пагинации)
+                lines.append("")
+                lines.append("❓ /помощь — список команд")
         
         # Добавляем команды фильтрации в текст сообщения (только для админов)
         if is_admin and has_any_invited:
@@ -1495,15 +1757,66 @@ class MeetingHandler:
             ),
         ]
 
+    def _format_participants_list_paginated(
+        self,
+        participants_list: List[Dict[str, Any]],
+        page: int = 1,
+    ) -> tuple[List[str], int, int]:
+        """
+        Форматирует список постоянных участников с пагинацией.
+        
+        Args:
+            participants_list: Список участников
+            page: Номер страницы (начинается с 1)
+            
+        Returns:
+            Кортеж (строки для сообщения, текущая страница, всего страниц)
+        """
+        per_page = self.config.get_invited_per_page()
+        total = len(participants_list)
+        total_pages = (total + per_page - 1) // per_page if total > 0 else 1
+        
+        # Ограничиваем номер страницы
+        page = max(1, min(page, total_pages))
+        
+        # Сортируем список
+        sorted_participants = sorted(
+            participants_list,
+            key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
+        )
+        
+        # Вычисляем диапазон для текущей страницы
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        page_items = sorted_participants[start_idx:end_idx]
+        
+        lines = []
+        for i, participant in enumerate(page_items, start=start_idx + 1):
+            num = f"{i}."
+            fio = (participant.get("full_name") or "").strip() or "—"
+            contact = participant.get("email") or participant.get("phone") or ""
+            part = f"{num} {fio}"
+            if contact:
+                part += f" — {contact}"
+            lines.append(part)
+        
+        return lines, page, total_pages
+
     def _handle_participants(
         self,
         event: MessageBotEvent,
         skip_parse_and_save: bool = False,
+        page: Optional[int] = 1,
     ) -> None:
         """
         Обрабатывает команду /участники: список постоянных участников из БД.
         Только для админов.
         """
+        # Устанавливаем контекст участников для последующей пагинации
+        sender_id = getattr(event, "sender_id", None)
+        if sender_id:
+            self._user_participants_context[sender_id] = True
+        
         email = self.service.get_user_email(event)
         is_admin = bool(email and self.service.meeting_repo.is_admin(email))
         
@@ -1558,21 +1871,48 @@ class MeetingHandler:
         
         header = "👥 **Постоянные участники**\n"
         lines = [header]
+        
+        # Добавляем информацию о количестве
+        total_count = len(all_participants)
+        lines.append(f"👥 **Участников:** {total_count}")
+        lines.append("")  # Пустая строка для разделения
+        
         if not all_participants:
             lines.append("Список пуст.")
         else:
-            sorted_participants = sorted(
-                all_participants,
-                key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
-            )
-            for i, participant in enumerate(sorted_participants):
-                num = f"{i + 1}."
-                fio = (participant.get("full_name") or "").strip() or "—"
-                contact = participant.get("email") or participant.get("phone") or ""
-                part = f"{num} {fio}"
-                if contact:
-                    part += f" — {contact}"
-                lines.append(part)
+            # Используем пагинацию только если page не None
+            if page is not None:
+                list_lines, current_page, total_pages = self._format_participants_list_paginated(
+                    all_participants, page=page
+                )
+                lines.extend(list_lines)
+                
+                # Добавляем номера страниц после списка
+                if total_pages > 1:
+                    page_items = []
+                    # Используем простые команды /1, /2, /3 и т.д.
+                    for p in range(1, total_pages + 1):
+                        if p == current_page:
+                            page_items.append(str(p))
+                        else:
+                            page_items.append(f"/{p}")
+                    page_items.append("/все")
+                    lines.append("")
+                    lines.append(f"Страницы: {' '.join(page_items)}")
+            else:
+                # Показываем весь список без пагинации
+                sorted_participants = sorted(
+                    all_participants,
+                    key=lambda x: ((x.get("full_name") or "").strip() or "—").upper(),
+                )
+                for i, participant in enumerate(sorted_participants):
+                    num = f"{i + 1}."
+                    fio = (participant.get("full_name") or "").strip() or "—"
+                    contact = participant.get("email") or participant.get("phone") or ""
+                    part = f"{num} {fio}"
+                    if contact:
+                        part += f" — {contact}"
+                    lines.append(part)
         
         # Добавляем команду помощи и текст перед кнопками (только для админов)
         if is_admin:
@@ -1663,8 +2003,25 @@ class MeetingHandler:
 
     def _show_help(self, event: MessageBotEvent) -> None:
         """Показывает справку. Для админов — без строки /информация."""
+        # Получаем ФИО пользователя
+        fio = self.service.get_user_fio(event.sender_id, event)
         email = self.service.get_user_email(event)
         is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+        
+        # Формируем начало сообщения с ФИО и статусом администратора
+        header_parts = []
+        if fio:
+            header_parts.append(f"**ФИО:** {fio}")
+        if is_admin:
+            header_parts.append("**Статус:** Администратор собраний")
+        
         key = "help_admin" if is_admin else "help"
         message = self.config.get_message(key) or self.config.get_message("help")
-        event.reply_text(message)
+        
+        # Добавляем заголовок в начало сообщения
+        if header_parts:
+            full_message = "\n".join(header_parts) + "\n\n" + message
+        else:
+            full_message = message
+        
+        event.reply_text(full_message)

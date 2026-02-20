@@ -170,6 +170,7 @@ LOG_FILE=/app/logs/bot.log
 | `HEALTH_CHECK_GROUP_ID` | Да* | ID группы для health check |
 | `HEALTH_CHECK_WORKSPACE_ID` | Нет | ID workspace (по умолчанию -1) |
 | `HEALTH_CHECK_TIMEOUT` | Нет | Таймаут ожидания эхо в секундах (по умолчанию 10) |
+| `INVITED_PER_PAGE` | Нет | Количество приглашённых на странице при пагинации (по умолчанию 15) |
 
 *Для health check нужен HEALTH_CHECK_GROUP_ID.
 

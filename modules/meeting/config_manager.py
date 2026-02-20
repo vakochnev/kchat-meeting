@@ -207,3 +207,13 @@ class MeetingConfigManager:
             return {}
         
         return self._config.get("buttons", {})
+    
+    def get_invited_per_page(self) -> int:
+        """
+        Возвращает количество приглашённых на странице.
+        Читает значение из переменной окружения INVITED_PER_PAGE через config.py.
+        
+        Returns:
+            Количество записей на странице (по умолчанию 15).
+        """
+        return config.invited_per_page

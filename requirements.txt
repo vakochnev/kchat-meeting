@@ -10,7 +10,7 @@ jmespath==1.1.0
 load-dotenv==0.1.0
 Mako==1.3.10
 MarkupSafe==3.0.3
-messenger_bot_api @ file:///libs/messenger_bot_api-2.0.5-py3-none-any.whl#sha256=ba122457932dbadeb240e95862e9531735564cf573f30d52e6274e50f46ca141
+messenger_bot_api @ file:libs/messenger_bot_api-2.0.5-py3-none-any.whl#sha256=ba122457932dbadeb240e95862e9531735564cf573f30d52e6274e50f46ca141
 numpy==1.26.4
 opencv-python==4.11.0.86
 psycopg2-binary==2.9.11

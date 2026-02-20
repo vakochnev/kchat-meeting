@@ -81,6 +81,11 @@ class Config:
         default_factory=lambda: os.getenv("EMAIL_TEMPLATE_PATH", "")
     )
     
+    # Пагинация списка приглашённых
+    invited_per_page: int = field(
+        default_factory=lambda: int(os.getenv("INVITED_PER_PAGE", "10"))
+    )
+    
     # Настройки совещаний из config.yml
     meeting_settings: Dict[str, Any] = field(default_factory=dict)
     
