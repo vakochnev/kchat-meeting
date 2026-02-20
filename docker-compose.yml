@@ -13,7 +13,7 @@ services:
     command: >
       bash -c "
       alembic upgrade head &&
-      bash tools/seed_meeting_admins.py &&
+      python3 tools/seed_meeting_admins.py &&
       python3 main.py
       "
     volumes:
