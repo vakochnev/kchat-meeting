@@ -608,6 +608,23 @@ class MeetingService:
         """Возвращает дату/время активного совещания из БД или None."""
         return self.meeting_repo.get_meeting_datetime()
 
+    def is_active_meeting_in_future(self) -> bool:
+        """
+        Возвращает True, если есть активное собрание и его дата/время не в прошлом.
+        Если дата собрания в прошлом — возвращает False (нужно создавать новое).
+        """
+        meeting_dt = self._get_meeting_datetime()
+        if meeting_dt is None:
+            return False
+        now = datetime.now()
+        # Учитываем naive datetime: сравниваем в одной временной зоне
+        if meeting_dt.tzinfo is not None and now.tzinfo is None:
+            from datetime import timezone
+            now = now.replace(tzinfo=timezone.utc)
+        elif meeting_dt.tzinfo is None and now.tzinfo is not None:
+            meeting_dt = meeting_dt.replace(tzinfo=now.tzinfo)
+        return meeting_dt >= now
+
     def _get_meeting_id(self) -> Optional[int]:
         """Возвращает ID активного собрания или None."""
         info = self.meeting_repo.get_meeting_info()
