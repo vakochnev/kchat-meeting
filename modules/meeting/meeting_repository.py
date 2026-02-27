@@ -51,10 +51,14 @@ class MeetingRepository:
     """Репозиторий для Meeting и Invited."""
 
     def get_active_meeting(self) -> Optional[Meeting]:
-        """Возвращает последнее созданное собрание (по id)."""
+        """Возвращает последнее собрание, если оно ещё не прошло."""
         with get_session_context() as session:
-            stmt = select(Meeting).order_by(Meeting.id.desc()).limit(1)
-            return session.scalar(stmt)
+            meeting = session.scalar(
+                select(Meeting).order_by(Meeting.id.desc()).limit(1)
+            )
+            if meeting and self._is_meeting_past(meeting):
+                return None
+            return meeting
 
     def get_meeting_by_id(self, meeting_id: int) -> Optional[Meeting]:
         """Возвращает совещание по ID."""
@@ -79,13 +83,15 @@ class MeetingRepository:
     def get_meeting_info(self) -> Dict[str, Any]:
         """
         Возвращает данные последнего собрания в формате словаря.
-        (topic, date, time, place, link, url).
+        Если собрание уже прошло (дата/время в прошлом) — возвращает пустой словарь.
         """
         with get_session_context() as session:
             meeting = session.scalar(
                 select(Meeting).order_by(Meeting.id.desc()).limit(1)
             )
             if not meeting:
+                return {}
+            if self._is_meeting_past(meeting):
                 return {}
             return {
                 "meeting_id": meeting.id,
@@ -96,6 +102,41 @@ class MeetingRepository:
                 "place": meeting.place,
                 "link": meeting.link,
             }
+
+    def get_meeting_info_include_past(self) -> Dict[str, Any]:
+        """
+        Возвращает данные последнего собрания, включая прошедшие.
+        Используется для проверки «есть ли вообще собрание» (например, в /собрание).
+        """
+        with get_session_context() as session:
+            meeting = session.scalar(
+                select(Meeting).order_by(Meeting.id.desc()).limit(1)
+            )
+            if not meeting:
+                return {}
+            info = {
+                "meeting_id": meeting.id,
+                "topic": meeting.topic,
+                "url": meeting.url,
+                "date": meeting.date,
+                "time": meeting.time,
+                "place": meeting.place,
+                "link": meeting.link,
+            }
+            info["is_past"] = self._is_meeting_past(meeting)
+            return info
+
+    @staticmethod
+    def _is_meeting_past(meeting: "Meeting") -> bool:
+        """Проверяет, прошло ли собрание (дата+время < текущий момент)."""
+        if not meeting.date:
+            return False
+        meeting_dt = MeetingRepository._parse_datetime(
+            meeting.date, meeting.time or "23:59"
+        )
+        if not meeting_dt:
+            return False
+        return meeting_dt < datetime.now()
 
     def get_meeting_datetime(self) -> Optional[datetime]:
         """Возвращает datetime последнего собрания."""

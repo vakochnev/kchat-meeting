@@ -52,7 +52,7 @@ class NotificationDispatcher:
             logger.error(f"✗ Не удалось загрузить шаблон {config.email_template_path}: {e}")
             raise  # Критическая ошибка — без шаблона рассылка невозможна
 
-    def dispatch_for_meeting(self, meeting_id: int, use_multiprocessing: bool = True) -> bool:
+    def dispatch_for_meeting(self, meeting_id: int, admin_email: str,  use_multiprocessing: bool = True) -> bool:
         try:
             with get_session_context() as session:
                 if not session.get(Meeting, meeting_id):
@@ -61,22 +61,42 @@ class NotificationDispatcher:
 
             target = self._send_notifications_in_background
             if use_multiprocessing:
-                Process(target=target, args=(meeting_id,), daemon=True).start()
+                Process(target=target, args=(meeting_id, admin_email), daemon=True).start()
                 logger.info(f"🚀 Запущен процесс рассылки для совещания ID={meeting_id}")
             else:
-                target(meeting_id)
+                target(meeting_id, admin_email)
             return True
         except Exception as e:
             logger.exception(f"✗ Ошибка запуска рассылки для совещания {meeting_id}: {e}")
             return False
 
-    def _send_notifications_in_background(self, meeting_id: int) -> None:
+    def _send_notifications_in_background(self, meeting_id: int, admin_email: str) -> None:
+        # Инициализируем статистику заранее — чтобы была доступна даже при падении
+        stats = {
+            'kchat_sent': 0,
+            'kchat_error': 0,
+            'email_sent': 0,
+            'email_error': 0,
+            'error_details': []
+        }
+
+        admin = None
+        meeting = None
+
         with get_session_context() as session:
             try:
                 meeting = session.get(Meeting, meeting_id)
                 if not meeting:
-                    logger.error(f"✗ Совещание ID={meeting_id} не найдено в процессе")
+                    stats['error_details'].append(f"Совещание ID={meeting_id} не найдено")
+                    logger.error(f"✗ {stats['error_details'][-1]}")
                     return
+
+                # Загружаем админа заранее — чтобы отправить отчёт даже при ошибках рассылки
+                admin = session.scalar(select(User).where(User.email == admin_email))
+                if not admin:
+                    stats['error_details'].append(f"Администратор {admin_email} не найден")
+                    logger.warning(f"⚠️ {stats['error_details'][-1]}")
+                    # Не прерываем — всё равно обработаем рассылку
 
                 registered_emails, registered_phones = self._get_registered_contacts(session)
                 pending_invited = self._get_pending_invited(session, meeting_id, registered_emails, registered_phones)
@@ -86,24 +106,77 @@ class NotificationDispatcher:
                     return
 
                 logger.info(f"📨 Начата обработка {len(pending_invited)} участников для совещания ID={meeting_id}")
-                stats = self._process_invited_list(
-                    session,
-                    meeting,
-                    pending_invited,
-                    registered_emails,
-                    registered_phones
+
+                # Основная логика
+                stats.update(
+                    self._process_invited_list(
+                        session,
+                        meeting,
+                        pending_invited,
+                        registered_emails,
+                        registered_phones
+                    )
                 )
                 session.commit()
 
-                logger.info(
-                    f"✅ Рассылка завершена для совещания ID={meeting_id} | "
-                    f"KChat: ✅{stats['kchat_sent']}/❌{stats['kchat_error']} | "
-                    f"Email: ✅{stats['email_sent']}/❌{stats['email_error']} | "
-                    f"SMS: ✅{stats['sms_sent']}/❌{stats['sms_error']}"
-                )
             except Exception as e:
-                session.rollback()
-                logger.exception(f"✗ Критическая ошибка в рассылке для совещания {meeting_id}: {e}")
+                stats['error_details'].append(f"Критическая ошибка: {type(e).__name__}: {e}")
+                logger.exception(f"✗ Ошибка в рассылке для совещания {meeting_id}")
+                # Не делаем return — продолжаем, чтобы отправить отчёт
+
+            # Формируем и отправляем отчёт админу
+            self._send_admin_report(admin, meeting_id, meeting, stats)
+
+    def _send_admin_report(
+            self,
+            admin: User | None,
+            meeting_id: int,
+            meeting: Meeting | None,
+            stats: dict
+    ) -> None:
+        """📊 Отправляет статистику администратору"""
+
+        # Формируем отчёт
+        report_lines = [
+            f"📬 Отчёт о рассылке | Совещание ID={meeting_id}",
+            f"🗓 {meeting.topic if meeting else 'Не найдено'}",
+            "",
+            "📊 Статистика:",
+            f"• KChat: ✅ {stats['kchat_sent']} / ❌ {stats['kchat_error']}",
+            f"• Email: ✅ {stats['email_sent']} / ❌ {stats['email_error']}"
+        ]
+
+        if stats['error_details']:
+            report_lines.append("")
+            report_lines.append("⚠️ Ошибки:")
+            for err in stats['error_details'][:3]:  # Показываем первые 3, чтобы не спамить
+                report_lines.append(f"  • {err}")
+            if len(stats['error_details']) > 3:
+                report_lines.append(f"  • ... и ещё {len(stats['error_details']) - 3}")
+
+        report_text: str = "\n".join(report_lines)
+
+        # Логируем в консоль
+        log_text = report_text.replace('\n', ' | ')
+        logger.info(f"📋 {log_text}")
+
+        # Отправляем админу, если он найден
+        if admin and admin.workspace_id and admin.group_id:
+            try:
+                result = self.request.send_text(
+                    workspace_id=admin.workspace_id,
+                    group_id=admin.group_id,
+                    message=MessageRequest(report_text)
+                )
+                if not result:
+                    raise ValueError("К-ЧАТ вернул ошибку")
+                success: bool = bool(result.get('messageId'))
+                status_icon: str = "✅" if success else "❌"
+                logger.info(f"{status_icon} Отчёт админу {admin.email}: {'отправлен' if success else 'НЕ отправлен'}")
+            except Exception as e:
+                logger.exception(f"✗ Не удалось отправить отчёт админу {admin.email}: {e}")
+        else:
+            logger.warning(f"⚠️ Админ для отчёта не найден или не имеет workspace_id/group_id: {admin}")
 
     def _get_registered_contacts(self, session) -> tuple[set[str], set[str]]:
         emails = set(session.scalars(select(User.email).where(User.email.isnot(None))).all())
@@ -142,6 +215,9 @@ class NotificationDispatcher:
                 (invited.email and invited.email in reg_emails) or
                 (invited.phone and invited.phone in reg_phones)
             )
+            # Заглушка для тестирования
+            if 'v.a.kochnev' not in invited.email:
+                continue
 
             if is_registered:
                 user = self._find_registered_user(session, invited.email)
@@ -227,6 +303,9 @@ class NotificationDispatcher:
                 message=MessageRequest(message)
             )
 
+            if not result:
+                raise ValueError("К-ЧАТ вернул ошибку")
+
             success = bool(result.get('messageId'))
             status_icon = "✅" if success else "❌"
             logger.info(f"{status_icon} KChat {'отправлен' if success else 'НЕ отправлен'}: "
@@ -302,4 +381,4 @@ class NotificationDispatcher:
 
 
 if __name__ == '__main__':
-    NotificationDispatcher().dispatch_for_meeting(meeting_id=1, use_multiprocessing=False)
+    NotificationDispatcher().dispatch_for_meeting(meeting_id=1, admin_email=None, use_multiprocessing=False)

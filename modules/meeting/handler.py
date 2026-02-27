@@ -18,7 +18,14 @@ from .add_permanent_invited_flow import AddPermanentInvitedFlow
 from .edit_delete_permanent_invited_flow import EditDeletePermanentInvitedFlow
 from .search_permanent_invited_flow import SearchPermanentInvitedFlow
 from .schedule_utils import calculate_next_meeting_date, format_date_for_meeting
+from .user_context import UserContextStore
+from .command_resolver import CommandResolver
+from .invited_parser import parse_invited_list
+from .invited_handler import InvitedHandler
+from .participants_handler import ParticipantsHandler
+from .command_dispatcher import CommandDispatcher
 from config import config
+from modules.dispatcher.dispatcher import NotificationDispatcher
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +69,136 @@ class MeetingHandler:
         self.add_permanent_invited_flow = AddPermanentInvitedFlow()
         self.edit_delete_permanent_invited_flow = EditDeletePermanentInvitedFlow()
         self.search_permanent_invited_flow = SearchPermanentInvitedFlow()
-        # Хранилище последнего активного фильтра по sender_id
         self._user_filter_context: dict[int, Optional[str]] = {}
-        # Хранилище контекста просмотра участников по sender_id
         self._user_participants_context: dict[int, bool] = {}
-    
+        self._user_context = UserContextStore()
+        self._command_resolver = CommandResolver(self._user_context)
+        self._invited_handler = InvitedHandler(
+            self.service,
+            self.config,
+            self.add_invited_flow,
+            self.edit_delete_invited_flow,
+            self.search_invited_flow,
+        )
+        self._participants_handler = ParticipantsHandler(
+            self.service,
+            self.config,
+            self._user_context,
+            self.add_permanent_invited_flow,
+            self.edit_delete_permanent_invited_flow,
+            self.search_permanent_invited_flow,
+        )
+        self._dispatcher = self._build_dispatcher()
+        self._cancel_table = self._build_cancel_table()
+
+    def _build_dispatcher(self) -> CommandDispatcher:
+        """Регистрирует все команды в диспетчере."""
+        d = CommandDispatcher()
+        d.register("start", self._handle_start)
+        d.register("meeting", self._handle_meeting_check)
+        d.register("invited", self._cmd_invited)
+        d.register("invited_not_voted", self._cmd_invited_not_voted)
+        d.register("invited_voted", self._cmd_invited_voted)
+        d.register("invited_all", self._cmd_invited_all)
+        d.register("invited_page", self._cmd_invited_page)
+        d.register("participants", self._cmd_participants)
+        d.register("participants_page", self._cmd_participants_page)
+        d.register("participants_all", self._cmd_participants_all)
+        d.register("send", self._handle_send)
+        d.register("meeting_menu", self._cmd_meeting_menu)
+        d.register("create_meeting", self._handle_create_meeting)
+        d.register("cancel", self._handle_cancel)
+        d.register("help", self._show_help)
+        return d
+
+    def _build_cancel_table(self) -> list:
+        """Таблица (flow, callback_after_cancel)."""
+        return [
+            (self.create_meeting_flow, lambda ev: self._show_help(ev)),
+            (self.edit_meeting_flow, lambda ev: self._show_help(ev)),
+            (
+                self.add_invited_flow,
+                lambda ev: self._invited_handler.handle_invited(ev, skip_parse_and_save=True),
+            ),
+            (
+                self.edit_delete_invited_flow,
+                lambda ev: self._invited_handler.handle_invited(ev, skip_parse_and_save=True),
+            ),
+            (
+                self.search_invited_flow,
+                lambda ev: self._invited_handler.handle_invited(ev, skip_parse_and_save=True),
+            ),
+            (
+                self.add_permanent_invited_flow,
+                lambda ev: self._participants_handler.handle_participants(
+                    ev, skip_parse_and_save=True, page=1
+                ),
+            ),
+            (
+                self.edit_delete_permanent_invited_flow,
+                lambda ev: self._participants_handler.handle_participants(
+                    ev, skip_parse_and_save=True, page=1
+                ),
+            ),
+            (
+                self.search_permanent_invited_flow,
+                lambda ev: self._participants_handler.handle_participants(
+                    ev, skip_parse_and_save=True, page=1
+                ),
+            ),
+        ]
+
+    # ── Обёртки для диспетчера ──
+
+    def _cmd_invited(self, event: MessageBotEvent) -> None:
+        self._user_context.switch_to_invited_list(getattr(event, "sender_id", None))
+        self._invited_handler.handle_invited(event)
+
+    def _cmd_invited_not_voted(self, event: MessageBotEvent) -> None:
+        self._user_context.switch_to_invited_with_filter(
+            getattr(event, "sender_id", None), "not_voted"
+        )
+        self._invited_handler.handle_invited(event, filter_type="not_voted")
+
+    def _cmd_invited_voted(self, event: MessageBotEvent) -> None:
+        self._user_context.switch_to_invited_with_filter(
+            getattr(event, "sender_id", None), "voted"
+        )
+        self._invited_handler.handle_invited(event, filter_type="voted")
+
+    def _cmd_invited_all(self, event: MessageBotEvent) -> None:
+        self._user_context.switch_to_invited_all(getattr(event, "sender_id", None))
+        self._invited_handler.handle_invited(event, filter_type=None, page=None)
+
+    def _cmd_invited_page(self, event: MessageBotEvent) -> None:
+        self._user_context.reset_participants_for_page(getattr(event, "sender_id", None))
+        page_num = getattr(event, "_page_number", 1)
+        filter_type = getattr(event, "_filter_type", None)
+        self._invited_handler.handle_invited(event, filter_type=filter_type, page=page_num)
+
+    def _cmd_participants(self, event: MessageBotEvent) -> None:
+        self._participants_handler.handle_participants(event, page=1)
+
+    def _cmd_participants_page(self, event: MessageBotEvent) -> None:
+        self._user_context.switch_to_participants(getattr(event, "sender_id", None))
+        page_num = getattr(event, "_page_number", 1)
+        self._participants_handler.handle_participants(event, page=page_num)
+
+    def _cmd_participants_all(self, event: MessageBotEvent) -> None:
+        self._user_context.switch_to_participants(getattr(event, "sender_id", None))
+        self._participants_handler.handle_participants(event, page=None)
+
+    def _cmd_meeting_menu(self, event: MessageBotEvent) -> None:
+        email = self.service.get_user_email(event)
+        is_admin = bool(email and self.service.meeting_repo.is_admin(email))
+        if not is_admin:
+            event.reply_text(
+                self.config.get_message("not_allowed")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        self._handle_meeting_menu(event)
+
     def handle_message(self, event: MessageBotEvent) -> None:
         """Обрабатывает входящее сообщение."""
         text = (event.message_text or "").strip()
@@ -193,7 +325,7 @@ class MeetingHandler:
                     "Команда /пропустить доступна только для необязательных "
                     "полей (место, ссылка)."
                 )
-                return
+                return 
             if command != "cancel":
                 if self.create_meeting_flow.is_active(event):
                     self.create_meeting_flow.cancel(event)
@@ -244,7 +376,7 @@ class MeetingHandler:
             )
             event.reply_text(msg)
             if done:
-                self._handle_invited(event, skip_parse_and_save=True)
+                self._invited_handler.handle_invited(event, skip_parse_and_save=True)
             return
 
         # Ожидание строки поиска для приглашённых
@@ -298,7 +430,7 @@ class MeetingHandler:
             )
             event.reply_text(msg)
             if done:
-                self._handle_invited(event, skip_parse_and_save=True)
+                self._invited_handler.handle_invited(event, skip_parse_and_save=True)
             return
 
         # Ожидание email для удаления постоянного участника
@@ -374,7 +506,7 @@ class MeetingHandler:
                         event.reply_text(
                             f"✅ **Данные сохранены.** ✨ Добавлено: **{added}** чел."
                         )
-                        self._handle_invited(event, skip_parse_and_save=True)
+                        self._invited_handler.handle_invited(event, skip_parse_and_save=True)
                     return
                 except Exception as e:
                     logger.exception("Ошибка сохранения приглашённых: %s", e)
@@ -416,7 +548,15 @@ class MeetingHandler:
                 return
         
         # Обработка остальных callback
-        if callback_data == "meeting_create":
+        if callback_data == "create_meeting_schedule":
+            self._handle_create_meeting_from_schedule_callback(event)
+            return
+
+        if callback_data == "create_meeting_cancel":
+            self._show_help(event)
+            return
+
+        if callback_data in ("meeting_create", "create_meeting"):
             logger.debug("handle_callback: вызов _handle_create_meeting")
             self._handle_create_meeting(event)
             return
@@ -430,39 +570,39 @@ class MeetingHandler:
             return
 
         if callback_data == "invited_add":
-            self._handle_invited_add(event)
+            self._invited_handler.handle_add(event)
             return
 
         if callback_data == "invited_delete":
-            self._handle_invited_delete(event)
+            self._invited_handler.handle_delete(event)
             return
 
         if callback_data == "invited_search":
-            self._handle_invited_search(event)
+            self._invited_handler.handle_search(event)
             return
 
         if callback_data == "invited_filter_voted":
-            self._handle_invited(event, filter_type="voted")
+            self._invited_handler.handle_invited(event, filter_type="voted")
             return
 
         if callback_data == "invited_filter_not_voted":
-            self._handle_invited(event, filter_type="not_voted")
+            self._invited_handler.handle_invited(event, filter_type="not_voted")
             return
 
         if callback_data == "invited_filter_all":
-            self._handle_invited(event, filter_type=None)
+            self._invited_handler.handle_invited(event, filter_type=None)
             return
 
         if callback_data == "participants_add":
-            self._handle_participants_add(event)
+            self._participants_handler.handle_add(event)
             return
 
         if callback_data == "participants_delete":
-            self._handle_participants_delete(event)
+            self._participants_handler.handle_delete(event)
             return
 
         if callback_data == "participants_search":
-            self._handle_participants_search(event)
+            self._participants_handler.handle_search(event)
             return
         
         logger.warning("Неизвестный callback: %s", callback_data)
@@ -476,106 +616,8 @@ class MeetingHandler:
         self.service.process_sse_event(event_data)
     
     def _handle_command(self, event: MessageBotEvent, command: str) -> None:
-        """Обрабатывает команду."""
-        if command == "start":
-            self._handle_start(event)
-        
-        elif command == "meeting":
-            self._handle_meeting_check(event)
-
-        elif command == "invited":
-            # Сбрасываем контекст фильтра и участников при команде /приглашенные
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_filter_context[sender_id] = None
-                self._user_participants_context[sender_id] = False
-            self._handle_invited(event)
-
-        elif command == "invited_not_voted":
-            # Сохраняем контекст фильтра для последующей пагинации
-            # Сбрасываем контекст участников
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_filter_context[sender_id] = "not_voted"
-                self._user_participants_context[sender_id] = False
-            self._handle_invited(event, filter_type="not_voted")
-
-        elif command == "invited_voted":
-            # Сохраняем контекст фильтра для последующей пагинации
-            # Сбрасываем контекст участников
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_filter_context[sender_id] = "voted"
-                self._user_participants_context[sender_id] = False
-            self._handle_invited(event, filter_type="voted")
-
-        elif command == "invited_all":
-            # Команда /все - показываем весь список без пагинации
-            # Сбрасываем контекст фильтра и участников
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_filter_context[sender_id] = None
-                self._user_participants_context[sender_id] = False
-            # Всегда используем _handle_invited для показа списка приглашённых
-            self._handle_invited(event, filter_type=None, page=None)
-
-        elif command == "invited_page":
-            # Команда для перехода на страницу списка приглашённых (/2, /3, /неголосовали2, /голосовали2 и т.д.)
-            # Сбрасываем контекст участников
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_participants_context[sender_id] = False
-            page_num = getattr(event, "_page_number", 1)
-            filter_type = getattr(event, "_filter_type", None)
-            # Всегда используем _handle_invited для показа списка приглашённых с пагинацией
-            self._handle_invited(event, filter_type=filter_type, page=page_num)
-
-        elif command == "participants":
-            # Команда доступна только для админов (проверка уже есть в _handle_participants)
-            # Показываем первую страницу с пагинацией
-            self._handle_participants(event, page=1)
-        
-        elif command == "participants_page":
-            # Команда для перехода на страницу списка участников (/2, /3 и т.д.)
-            # Устанавливаем контекст участников для последующей пагинации
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_participants_context[sender_id] = True
-            page_num = getattr(event, "_page_number", 1)
-            self._handle_participants(event, page=page_num)
-        
-        elif command == "participants_all":
-            # Команда /все - показываем весь список участников без пагинации
-            # Устанавливаем контекст участников
-            sender_id = getattr(event, "sender_id", None)
-            if sender_id:
-                self._user_participants_context[sender_id] = True
-            self._handle_participants(event, page=None)
-
-        elif command == "send":
-            # Команда доступна только для админов
-            self._handle_send(event)
-
-        elif command == "meeting_menu":
-            # Команда доступна только для админов
-            email = self.service.get_user_email(event)
-            is_admin = bool(email and self.service.meeting_repo.is_admin(email))
-            if not is_admin:
-                event.reply_text(
-                    self.config.get_message("not_allowed")
-                    or "❌ Команда доступна только администраторам."
-                )
-                return
-            self._handle_meeting_menu(event)
-
-        elif command == "create_meeting":
-            self._handle_create_meeting(event)
-
-        elif command == "cancel":
-            self._handle_cancel(event)
-
-        elif command == "help":
-            self._show_help(event)
+        """Делегирует обработку команды диспетчеру."""
+        self._dispatcher.dispatch(event, command)
     
     def _create_meeting_from_schedule(
         self, event: MessageBotEvent, admin_email: str, page: Optional[int] = 1
@@ -685,6 +727,25 @@ class MeetingHandler:
                 "Проверьте логи и настройки в config/meeting_settings.yml"
             )
             return False
+
+    def _handle_create_meeting_from_schedule_callback(
+        self, event: MessageBotEvent
+    ) -> None:
+        """Callback кнопки '✅ Создать' — создаёт собрание по расписанию и показывает приглашённых."""
+        email = self.service.get_user_email(event)
+        if not email or not self.service.meeting_repo.is_admin(email):
+            event.reply_text(
+                self.config.get_message("not_allowed")
+                or "❌ Команда доступна только администраторам."
+            )
+            return
+        created = self._create_meeting_from_schedule(event, admin_email=email)
+        if not created:
+            event.reply_text(
+                "❌ Не удалось создать собрание из расписания.\n\n"
+                "Проверьте настройки в config/meeting_settings.yml\n"
+                "или создайте собрание вручную: /создать_собрание"
+            )
 
     def _show_meeting_info_to_admin(self, event: MessageBotEvent, meeting_id: Optional[int] = None, page: Optional[int] = 1) -> None:
         """
@@ -920,9 +981,8 @@ class MeetingHandler:
 
     def _show_meeting_menu(self, event: MessageBotEvent) -> None:
         """Отправляет меню собрания с кнопками (Создать, Изменить и Перенести при наличии собрания)."""
-        message_parts = ["📋 **Собрание**"]
-        
-        # Добавляем информацию о текущем собрании
+        message_parts = ["📋 **Собрание**\n"]
+
         meeting_info = self.service.get_meeting_info()
         if meeting_info:
             topic = meeting_info.get("topic")
@@ -930,7 +990,7 @@ class MeetingHandler:
             time_str = meeting_info.get("time") or ""
             place = meeting_info.get("place") or ""
             link = meeting_info.get("link") or ""
-            
+
             if topic:
                 message_parts.append(f"📌 **Тема:** {topic}")
             if date_str or time_str:
@@ -939,11 +999,14 @@ class MeetingHandler:
                 message_parts.append(f"📍 **Место:** {place}")
             if link:
                 message_parts.append(f"🔗 **Ссылка:** {link}")
-        
+        else:
+            message_parts.append("ℹ️ Активных собраний нет.")
+            message_parts.append("Нажмите «✨ Создать» для создания нового собрания.")
+
         message_parts.append("")
         message_parts.append("❓ /помощь — список команд")
         message_parts.append("\nВыберите действие:")
-        
+
         message = "\n".join(message_parts)
         buttons = self._get_meeting_menu_buttons()
         try:
@@ -1088,11 +1151,11 @@ class MeetingHandler:
         elif self.add_invited_flow.is_active(event):
             msg = self.add_invited_flow.cancel(event)
             event.reply_text(msg)
-            self._handle_invited(event, skip_parse_and_save=True)
+            self._invited_handler.handle_invited(event, skip_parse_and_save=True)
         elif self.edit_delete_invited_flow.is_active(event):
             msg = self.edit_delete_invited_flow.cancel(event)
             event.reply_text(msg)
-            self._handle_invited(event, skip_parse_and_save=True)
+            self._invited_handler.handle_invited(event, skip_parse_and_save=True)
         elif self.add_permanent_invited_flow.is_active(event):
             msg = self.add_permanent_invited_flow.cancel(event)
             event.reply_text(msg)
@@ -1108,7 +1171,7 @@ class MeetingHandler:
         elif self.search_invited_flow.is_active(event):
             msg = self.search_invited_flow.cancel(event)
             event.reply_text(msg)
-            self._handle_invited(event, skip_parse_and_save=True)
+            self._invited_handler.handle_invited(event, skip_parse_and_save=True)
         else:
             # Нет активного диалога - выводим информативное сообщение
             event.reply_text(
@@ -1991,37 +2054,41 @@ class MeetingHandler:
                 "📋 /собрание — создать собрание."
             )
             return
-        
-        # Пока функционал в разработке
-        event.reply_text(
-            "🚧 **Отправка уведомлений**\n\n"
-            "⚠️ Функционал находится в разработке.\n\n"
-            "В будущем здесь будет возможность отправки уведомлений о собрании:\n"
-            "📧 по электронной почте\n"
-            "💬 в чат пользователям K-Chat"
-        )
+
+        # Запуск рассылки уведомлений в другом процессе
+        meeting_id = meeting_info["meeting_id"]
+        sending_is_active = NotificationDispatcher().dispatch_for_meeting(meeting_id=meeting_id, admin_email=email)
+        if not sending_is_active:
+            error_text = f"Не удалось запустить отправку уведомлений пользователям для собрания: ID={meeting_id}"
+            logger.error(error_text)
+            event.reply_text(f"❌ {error_text}")
+        else:
+            event.reply_text("✅ Отправка уведомлений пользователям...")
 
     def _show_help(self, event: MessageBotEvent) -> None:
-        """Показывает справку. Для админов — без строки /информация."""
-        # Получаем ФИО пользователя
+        """Показывает справку. Скрывает /отправить если нет активного собрания."""
         fio = self.service.get_user_fio(event.sender_id, event)
         email = self.service.get_user_email(event)
         is_admin = bool(email and self.service.meeting_repo.is_admin(email))
-        
-        # Формируем начало сообщения с ФИО и статусом администратора
+
         header_parts = []
         if fio:
             header_parts.append(f"**ФИО:** {fio}")
         if is_admin:
             header_parts.append("**Статус:** Администратор собраний")
-        
+
         key = "help_admin" if is_admin else "help"
         message = self.config.get_message(key) or self.config.get_message("help")
-        
-        # Добавляем заголовок в начало сообщения
+
+        if is_admin and not self.service.get_meeting_info():
+            message = "\n".join(
+                line for line in message.splitlines()
+                if "/отправить" not in line
+            )
+
         if header_parts:
             full_message = "\n".join(header_parts) + "\n\n" + message
         else:
             full_message = message
-        
+
         event.reply_text(full_message)

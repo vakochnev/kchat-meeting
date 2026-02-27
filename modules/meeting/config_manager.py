@@ -214,6 +214,6 @@ class MeetingConfigManager:
         Читает значение из переменной окружения INVITED_PER_PAGE через config.py.
         
         Returns:
-            Количество записей на странице (по умолчанию 15).
+            Количество записей на странице (по умолчанию 10).
         """
         return config.invited_per_page
